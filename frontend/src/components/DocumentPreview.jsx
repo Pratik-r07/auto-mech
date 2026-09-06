@@ -68,11 +68,11 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
       {showHeader && (
         <div className="pb-2">
           <div className="flex items-start gap-3 border-b-2 border-[#d9645b] pb-3">
-            <div className="w-[70px] shrink-0 pt-1">
+            <div className="w-[100px] shrink-0 flex items-center justify-center">
               {company?.logo ? (
-                <img src={company.logo} alt="logo" className="w-[64px] h-[64px] object-contain" />
+               <img src={company.logo} alt="logo" className="w-[90px] h-[90px] object-contain" />
               ) : (
-                <div className="w-[64px] h-[64px] border-2 border-[#d9645b] rounded-full flex items-center justify-center">
+                <div className="w-[90px] h-[90px] border-2 border-[#d9645b] rounded-full flex items-center justify-center">
                   <div className="text-[10px] font-bold text-[#d9645b]">LOGO</div>
                 </div>
               )}
