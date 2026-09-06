@@ -94,6 +94,7 @@ class DocumentBase(BaseModel):
     invoice_date: str = ""
     subject: str = ""
     intro: str = ""
+    closing: str = ""
     # customer
     customer_name: str = ""
     customer_address: str = ""

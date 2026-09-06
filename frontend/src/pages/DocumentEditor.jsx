@@ -35,6 +35,7 @@ const blank = (docType) => ({
   invoice_date: "",
   subject: "",
   intro: "",
+  closing: "",
   customer_name: "",
   customer_address: "",
   customer_gstin: "",
@@ -58,6 +59,7 @@ export default function DocumentEditor() {
   const editing = !!id;
   const isBill = doc.doc_type === "bill";
   const isChallan = doc.doc_type === "challan";
+  const isQuotation = doc.doc_type === "quotation";
 
   useEffect(() => {
     api.get("/company").then((r) => setCompany(r.data));
@@ -166,6 +168,15 @@ export default function DocumentEditor() {
             <Field label="Kind Attn" value={doc.customer_attention} onChange={(v) => set("customer_attention", v)} testid="customer-attention-input" />
           </div>
         </Section>
+
+        {/* Subject & Intro – quotation letter format only */}
+        {isQuotation && (
+          <Section title="Letter Details">
+            <Field label="Subject" value={doc.subject} onChange={(v) => set("subject", v)} placeholder="e.g. Quotation for Filling Nozzle Auto Line" testid="subject-input" />
+            <FieldArea label="Intro paragraph (optional)" value={doc.intro} onChange={(v) => set("intro", v)} testid="intro-input" />
+            <FieldArea label="Closing paragraph (optional)" value={doc.closing} onChange={(v) => set("closing", v)} testid="closing-input" />
+          </Section>
+        )}
 
         {/* Meta */}
         <Section title="Document Info">
@@ -283,8 +294,8 @@ export default function DocumentEditor() {
           </Section>
         )}
 
-        {/* Terms – hidden for challan (uses default) */}
-        {!isChallan && (
+        {/* Terms – quotation letter format only; bill uses fixed legal terms, challan has none */}
+        {isQuotation && (
           <Section title="Terms & Conditions">
             {["payment", "taxes", "delivery", "freight", "guarantee"].map((k) => (
               <Field key={k} label={k} value={doc.terms?.[k] || ""} onChange={(v) => setTerm(k, v)} testid={`term-${k}`} />

@@ -37,12 +37,13 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
   const t = computeTotals(doc);
   const isBill = doc.doc_type === "bill";
   const isChallan = doc.doc_type === "challan";
+  const isQuotation = doc.doc_type === "quotation";
   const title = isBill ? "INVOICE" : isChallan ? "DELIVERY CHALLAN" : "QUOTATION";
   const rate = Number(doc.gst_rate || 0);
 
   const items = doc.items || [];
   // Pad to at least 8 rows for consistent height
-  const minRows = 8;
+  const minRows = 10;
   const padded = [...items, ...Array.from({ length: Math.max(0, minRows - items.length) }, () => null)];
 
   return (
@@ -67,13 +68,13 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
       {/* Letterhead */}
       {showHeader && (
         <div className="pb-2">
-          <div className="flex items-start gap-3 border-b-2 border-[#d9645b] pb-3">
+          <div className="flex items-center gap-3 border-b-2 border-[#d9645b] pb-3">
             <div className="w-[100px] shrink-0 flex items-center justify-center">
               {company?.logo ? (
-               <img src={company.logo} alt="logo" className="w-[90px] h-[90px] object-contain" />
+                <img src={company.logo} alt="logo" className="w-[90px] h-[90px] object-contain" />
               ) : (
                 <div className="w-[90px] h-[90px] border-2 border-[#d9645b] rounded-full flex items-center justify-center">
-                  <div className="text-[10px] font-bold text-[#d9645b]">LOGO</div>
+                  <div className="text-[11px] font-bold text-[#d9645b]">LOGO</div>
                 </div>
               )}
             </div>
@@ -125,22 +126,33 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
                 </div>
               ) : null}
               {company?.gstin ? (
-                <div className="text-[11px] font-semibold text-slate-900 mt-1">GSTIN: {company.gstin}</div>
+                <div className="text-[12px] font-semibold text-slate-900 mt-1">GSTIN: {company.gstin}</div>
               ) : null}
             </div>
           </div>
         </div>
       )}
 
+      {/* When printing on pre-printed letterhead stationery, leave blank space
+          at the top matching where the physical letterhead sits, so the
+          printed content starts below it instead of overlapping it. */}
+      {!showHeader && (
+        <div style={{ height: "50mm" }} aria-hidden="true" />
+      )}
+
+      {isQuotation ? (
+        <QuotationBody doc={doc} company={company} t={t} />
+      ) : (
+      <>
       {/* Title bar */}
       <div className={`mt-2 border border-slate-900 text-center py-1 font-bold text-[13px] tracking-[0.15em] ${showHeader ? "" : "mt-0"} ${isChallan ? "hidden" : ""}`}>
         {title}
       </div>
 
       {/* Meta – Buyer + document details */}
-      <div className={`grid grid-cols-2 ${isChallan ? "border" : "border-x border-b"} border-slate-900 text-[11.5px]`}>
+      <div className={`grid grid-cols-2 ${isChallan ? "border" : "border-x border-b"} border-slate-900 text-[13px]`}>
         {/* Buyer */}
-        <div className="p-2 border-r border-slate-900 min-h-[95px]">
+        <div className="p-2 border-r border-slate-900 min-h-[130px]">
           <div className="leading-snug">
             <span className="font-semibold">M/s. </span>
             <span>{doc.customer_name || ""}</span>
@@ -157,7 +169,7 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
           </div>
         </div>
         {/* Doc details */}
-        <div className="p-2 text-[11.5px]">
+        <div className="p-2 text-[13px]">
           <MetaRow label={isChallan ? "CHALLAN NO." : "INVOICE NO."} value={doc.number} dateLabel="Date" dateValue={doc.date} />
           {isBill && (
             <MetaRow label="Challan No." value={doc.challan_number} dateLabel="Date" dateValue={doc.challan_date} />
@@ -171,13 +183,13 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
 
       {/* "Please receive..." note between meta and items – challan only */}
       {isChallan && (
-        <div className="text-center italic py-1 text-[12px] border-x border-slate-900 bg-slate-50">
+        <div className="text-center italic py-1 text-[13px] border-x border-slate-900 bg-slate-50">
           Please receive the following goods in good order &amp; condition.
         </div>
       )}
 
       {/* Items table */}
-      <table className="w-full border-x border-b border-slate-900 border-collapse text-[11.5px]">
+      <table className="w-full border-x border-b border-slate-900 border-collapse text-[13px]">
         <thead>
           <tr className="text-center align-middle">
             <th className="border-r border-b border-slate-900 py-1 w-10 font-semibold">Sr.<br/>No.</th>
@@ -203,10 +215,10 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
             const parts = amt !== null ? split(amt) : null;
             return (
               <tr key={i} className="align-top">
-                <td className="border-r border-slate-900 px-1 text-center h-[24px]">
+                <td className="border-r border-slate-900 px-1 text-center h-[28px]">
                   {it ? String(i + 1).padStart(2, "0") : ""}
                 </td>
-                <td className="border-r border-slate-900 px-2">
+                <td className="border-r border-slate-900 px-2 text-[14.5px]">
                   {it ? it.description : ""}
                 </td>
                 {!isChallan && (
@@ -256,13 +268,13 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
 
       {/* Footer grid – bills / quotations */}
       {!isChallan && (
-      <div className="grid grid-cols-[1.6fr_1fr] border-x border-b border-slate-900 text-[11.5px]">
+      <div className="grid grid-cols-[1.6fr_1fr] border-x border-b border-slate-900 text-[13px]">
         {/* LEFT column */}
         <div className="border-r border-slate-900">
           <div className="border-b border-slate-900 px-2 py-1 font-semibold">
               GSTIN NO. : <span className="tracking-wider">{company?.gstin || "27AHOPR6367G1ZO"}</span>
             </div>
-          <div className="border-b border-slate-900 px-2 py-1 min-h-[42px]">
+          <div className="border-b border-slate-900 px-2 py-1 min-h-[48px]">
               <span className="font-semibold">Total Amount in Words : </span>
               <span className="italic">{numberToWordsINR(t.grand_total)}</span>
             </div>
@@ -282,26 +294,11 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
           </div>
           <div className="border-t border-slate-900 px-2 py-1 leading-snug">
             <div className="font-semibold">Terms and Conditions :</div>
-            {(() => {
-              const terms = doc.terms || {};
-              const list = Object.entries(terms).filter(([, v]) => v);
-              if (list.length === 0) {
-                return (
-                  <ol className="list-decimal list-inside">
-                    <li>Goods once sold can not be returned</li>
-                    <li>Subject to Thane Dist. Jurisdiction only.</li>
-                  </ol>
-                );
-              }
-              return (
-                <ol className="list-decimal list-inside">
-                  {list.map(([k, v]) => (
-                    <li key={k}><span className="capitalize font-medium">{k}:</span> {v}</li>
-                  ))}
-                </ol>
-              );
-            })()}
-            <div className="text-[10px] mt-1">E. &amp; O. E.</div>
+            <ol className="list-decimal list-inside">
+              <li>Goods once sold cannot be returned.</li>
+              <li>Subject to Thane Dist. Jurisdiction.</li>
+            </ol>
+            <div className="text-[11px] mt-1">E. &amp; O. E.</div>
           </div>
         </div>
 
@@ -312,7 +309,7 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
           <TotalRow label={`Add : SGST ${rate / 2}%`} value={t.sgst} hidden={doc.gst_type !== "cgst_sgst"} />
           <TotalRow label={`Add : IGST ${rate}%`} value={t.igst} hidden={doc.gst_type !== "igst"} />
           {doc.gst_type === "cgst_sgst" && (
-            <div className="grid grid-cols-[1fr_1fr_28px] border-b border-slate-900 px-0 h-[20px] text-slate-300">
+            <div className="grid grid-cols-[1fr_1fr_28px] border-b border-slate-900 px-0 h-[24px] text-slate-300">
               <div className="border-r border-slate-900 px-2">Add : IGST %</div>
               <div className="border-r border-slate-900 text-right px-1">—</div>
               <div className="text-center">—</div>
@@ -321,11 +318,11 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
           <TotalRow label="Rounded (+)" value={0} muted />
           <TotalRow label="Grand Amount" value={t.grand_total} bold big />
           <div className="border-t border-slate-900 px-2 py-1">
-            <div className="font-bold text-[11.5px]" style={{ color: "#d9645b", fontFamily: "'Playfair Display', serif" }}>
+            <div className="font-bold text-[13px]" style={{ color: "#d9645b", fontFamily: "'Playfair Display', serif" }}>
               For {company?.name || "Auto~Mech Spares & Service"}
             </div>
-            <div className="min-h-[38px]" />
-            <div className="text-right border-t border-slate-400 pt-0.5 text-[11px]">
+            <div className="min-h-[46px]" />
+            <div className="text-right border-t border-slate-400 pt-0.5 text-[12px]">
               <span className="italic">Authorised Signatory</span>
             </div>
           </div>
@@ -335,32 +332,35 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
 
       {/* Bottom seal row – bills / quotations */}
       {!isChallan && (
-        <div className="grid grid-cols-[1.6fr_1fr] text-[11px] mt-1">
+        <div className="grid grid-cols-[1.6fr_1fr] text-[12px] mt-1">
           <div className="text-center italic">Receiver&apos;s / Customer&apos;s Seal &amp; Sign.</div>
           <div />
         </div>
       )}
 
+      </>
+      )}
+
       {/* Challan-only compact footer — matches physical challan book */}
       {isChallan && (
         <div className="border-x border-b border-slate-900">
-          <div className="grid grid-cols-2 min-h-[110px]">
+          <div className="grid grid-cols-2 min-h-[130px]">
             <div className="border-r border-slate-900 p-3 flex flex-col justify-end">
-              <div className="text-[11px] font-semibold">
+              <div className="text-[12px] font-semibold">
                 Total Qty : {items.reduce((s, it) => s + Number(it.qty || 0), 0)}
               </div>
-              <div className="mt-8 border-t border-slate-500 pt-1 text-[11.5px] italic">
+              <div className="mt-8 border-t border-slate-500 pt-1 text-[13px] italic">
                 Receiver&apos;s Signature
               </div>
             </div>
             <div className="p-3 flex flex-col justify-between text-right">
               <div
-                className="font-bold text-[12px]"
+                className="font-bold text-[13px]"
                 style={{ color: "#d9645b", fontFamily: "'Playfair Display', serif" }}
               >
                 For {company?.name || "Auto~Mech Spares & Service"}
               </div>
-              <div className="border-t border-slate-500 pt-0.5 text-[11.5px]">
+              <div className="border-t border-slate-500 pt-0.5 text-[13px]">
                 <span className="italic">Authorised Signatory</span>
               </div>
             </div>
@@ -371,13 +371,112 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
   );
 }
 
+function QuotationBody({ doc, company, t }) {
+  const items = doc.items || [];
+  const terms = doc.terms || {};
+  const introText =
+    (doc.intro && doc.intro.trim()) ||
+    "This is with reference to your enquiry regarding the above mentioned subject. In this regard, please find herewith our best quote for the same.";
+  const closingText =
+    (doc.closing && doc.closing.trim()) ||
+    "We now look forward to your valuable Purchase Order at the earliest.";
+
+  return (
+    <div className="text-[13px] leading-snug" style={{ fontFamily: "'Times New Roman', 'Liberation Serif', serif" }}>
+      {/* Ref / Date */}
+      <div className="flex justify-between mt-3 mb-4">
+        <div><span className="font-semibold">REF :</span> {doc.number || ""}</div>
+        <div><span className="font-semibold">DT :</span> {doc.date || ""}</div>
+      </div>
+
+      {/* Buyer */}
+      <div className="mb-3">
+        <div><span className="font-semibold">M/s. </span>{doc.customer_name || ""}</div>
+        {doc.customer_address ? (
+          <div className="whitespace-pre-line">{doc.customer_address}</div>
+        ) : null}
+      </div>
+
+      {doc.customer_attention ? (
+        <div className="font-bold mb-2">Kind Atten : {doc.customer_attention}</div>
+      ) : null}
+      {doc.subject ? (
+        <div className="font-bold mb-3">Subject : {doc.subject}</div>
+      ) : null}
+
+      <div className="mb-2">Respected Sir,</div>
+      <div className="mb-4 text-justify">{introText}</div>
+
+      {/* Items table */}
+      <table className="w-full border border-slate-900 border-collapse text-[13px] mb-4">
+        <thead>
+          <tr className="text-center">
+            <th className="border border-slate-900 py-1 w-10 font-semibold">SL.</th>
+            <th className="border border-slate-900 py-1 font-semibold">DESCRIPTION</th>
+            <th className="border border-slate-900 py-1 w-24 font-semibold">UNIT RATE</th>
+            <th className="border border-slate-900 py-1 w-20 font-semibold">QTY REQD.</th>
+            <th className="border border-slate-900 py-1 w-28 font-semibold">AMOUNT</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((it, i) => {
+            const amt = Number(it.qty || 0) * Number(it.rate || 0);
+            return (
+              <tr key={i}>
+                <td className="border border-slate-900 px-1 text-center">{i + 1}.</td>
+                <td className="border border-slate-900 px-2 text-[14.5px]">{it.description}</td>
+                <td className="border border-slate-900 px-1 text-right">{it.rate ? `${money(it.rate)}/-` : ""}</td>
+                <td className="border border-slate-900 px-1 text-center">
+                  {it.qty}{it.unit ? " " + it.unit : ""}
+                </td>
+                <td className="border border-slate-900 px-1 text-right">{money(amt)}</td>
+              </tr>
+            );
+          })}
+          {Number(doc.discount_percent || 0) > 0 && (
+            <tr>
+              <td colSpan={4} className="border border-slate-900 px-2 text-right italic">
+                Less: Discount {doc.discount_percent}%
+              </td>
+              <td className="border border-slate-900 px-1 text-right">-{money(t.discount)}</td>
+            </tr>
+          )}
+          <tr>
+            <td colSpan={4} className="border border-slate-900 px-2 text-right font-semibold">Total</td>
+            <td className="border border-slate-900 px-1 text-right font-semibold">{money(t.subtotal)}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div className="mb-4">{closingText}</div>
+      <div>Thanking You,</div>
+      <div className="mb-6">Yours truly,</div>
+      <div className="font-bold" style={{ color: "#d9645b", fontFamily: "'Playfair Display', serif" }}>
+        For, {company?.name || "Auto Mech Spares & Service"}
+      </div>
+      <div className="min-h-[50px]" />
+      <div className="italic mb-6">Authorised Signatory</div>
+
+      {/* Terms */}
+      <div className="font-bold underline mb-1">TERMS AND CONDITIONS</div>
+      <div className="space-y-0.5">
+        <div><span className="font-semibold">PAYMENT</span> : {terms.payment || ""}</div>
+        <div><span className="font-semibold">TAXES</span> : {terms.taxes || ""}</div>
+        <div><span className="font-semibold">DELIVERY</span> : {terms.delivery || ""}</div>
+        <div><span className="font-semibold">FREIGHT</span> : {terms.freight || ""}</div>
+        <div><span className="font-semibold">GUARANTEE</span> : {terms.guarantee || ""}</div>
+      </div>
+    </div>
+  );
+}
+
 function MetaRow({ label, value, dateLabel, dateValue }) {
   return (
     <div className="flex items-baseline gap-2 py-1 border-b border-dashed border-slate-300 last:border-0">
       <span className="font-semibold whitespace-nowrap">{label}:</span>
-      <span className="flex-1 border-b border-slate-500 min-h-[16px] px-1">{value || ""}</span>
+      <span className="flex-1 border-b border-slate-500 min-h-[19px] px-1">{value || ""}</span>
       <span className="whitespace-nowrap">{dateLabel}:</span>
-      <span className="w-24 border-b border-slate-500 min-h-[16px] px-1">{dateValue || ""}</span>
+      <span className="w-24 border-b border-slate-500 min-h-[19px] px-1">{dateValue || ""}</span>
     </div>
   );
 }
@@ -387,7 +486,7 @@ function TotalRow({ label, value, bold, big, muted, hidden }) {
   const parts = split(value);
   return (
     <div
-      className={`grid grid-cols-[1fr_1fr_28px] border-b border-slate-900 h-[22px] ${
+      className={`grid grid-cols-[1fr_1fr_28px] border-b border-slate-900 h-[27px] ${
         big ? "bg-slate-50" : ""
       } ${muted ? "text-slate-400" : ""}`}
     >
