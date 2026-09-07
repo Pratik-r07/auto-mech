@@ -56,6 +56,8 @@ export default function DocumentEditor() {
   const [company, setCompany] = useState({});
   const [clients, setClients] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [catalog, setCatalog] = useState([]);
+  const [openSuggestFor, setOpenSuggestFor] = useState(null);
   const editing = !!id;
   const isBill = doc.doc_type === "bill";
   const isChallan = doc.doc_type === "challan";
@@ -64,6 +66,7 @@ export default function DocumentEditor() {
   useEffect(() => {
     api.get("/company").then((r) => setCompany(r.data));
     api.get("/clients").then((r) => setClients(r.data));
+    api.get("/items").then((r) => setCatalog(r.data)).catch(() => {});
     if (id) {
       api.get(`/documents/${id}`).then((r) => setDoc(r.data));
     } else if (docType !== "challan") {
@@ -77,6 +80,17 @@ export default function DocumentEditor() {
   const set = useCallback((k, v) => setDoc((d) => ({ ...d, [k]: v })), []);
   const setItem = (i, k, v) =>
     setDoc((d) => ({ ...d, items: d.items.map((it, idx) => (idx === i ? { ...it, [k]: v } : it)) }));
+  const selectCatalogItem = (i, catItem) => {
+    setDoc((d) => ({
+      ...d,
+      items: d.items.map((it, idx) =>
+        idx === i
+          ? { ...it, description: catItem.description, hsn: catItem.hsn || it.hsn, unit: catItem.unit || it.unit, rate: catItem.rate || it.rate }
+          : it
+      ),
+    }));
+    setOpenSuggestFor(null);
+  };
   const addItem = () =>
     setDoc((d) => ({
       ...d,
@@ -223,13 +237,40 @@ export default function DocumentEditor() {
                     <Trash size={15} weight="bold" />
                   </button>
                 </div>
-                <Textarea
-                  data-testid={`item-desc-${i}`}
-                  value={it.description}
-                  onChange={(e) => setItem(i, "description", e.target.value)}
-                  placeholder="Item description"
-                  className="mb-2 border-slate-300 focus:ring-2 focus:ring-orange-500 min-h-[44px] text-sm"
-                />
+                <div className="relative mb-2">
+                  <Textarea
+                    data-testid={`item-desc-${i}`}
+                    value={it.description}
+                    onChange={(e) => setItem(i, "description", e.target.value)}
+                    onFocus={() => setOpenSuggestFor(i)}
+                    onBlur={() => setTimeout(() => setOpenSuggestFor((cur) => (cur === i ? null : cur)), 150)}
+                    placeholder="Item description"
+                    className="border-slate-300 focus:ring-2 focus:ring-orange-500 min-h-[44px] text-sm"
+                  />
+                  {openSuggestFor === i && it.description && (() => {
+                    const q = it.description.trim().toLowerCase();
+                    const matches = catalog
+                      .filter((c) => c.description.toLowerCase().includes(q) && c.description.toLowerCase() !== q)
+                      .slice(0, 6);
+                    if (matches.length === 0) return null;
+                    return (
+                      <div className="absolute z-10 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-md shadow-lg max-h-48 overflow-auto">
+                        {matches.map((m, mi) => (
+                          <button
+                            key={mi}
+                            type="button"
+                            data-testid={`item-suggestion-${i}-${mi}`}
+                            onMouseDown={(e) => { e.preventDefault(); selectCatalogItem(i, m); }}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-orange-50 border-b border-slate-100 last:border-b-0 flex items-center justify-between gap-2"
+                          >
+                            <span className="truncate">{m.description}</span>
+                            <span className="text-xs text-slate-400 shrink-0">₹{m.rate}</span>
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
                 {isChallan ? (
                   <div className="grid grid-cols-2 gap-2">
                     <MiniField label="Qty" type="number" value={it.qty} onChange={(v) => setItem(i, "qty", v)} testid={`item-qty-${i}`} />

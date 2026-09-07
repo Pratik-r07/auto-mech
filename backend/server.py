@@ -81,6 +81,13 @@ class LineItem(BaseModel):
     rate: float = 0
 
 
+class ItemCatalogOut(BaseModel):
+    description: str = ""
+    hsn: str = ""
+    unit: str = "nos"
+    rate: float = 0
+
+
 class DocumentBase(BaseModel):
     model_config = ConfigDict(extra="ignore")
     doc_type: Literal["quotation", "bill", "challan"] = "quotation"
@@ -352,6 +359,49 @@ async def delete_client(client_id: str, user: dict = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
+# Item catalog — remembers every item description + its last-used rate/unit,
+# so it can be looked up and auto-filled next time the same item is typed.
+# ---------------------------------------------------------------------------
+async def remember_items(items: list):
+    for it in items or []:
+        desc = (it.get("description") or "").strip()
+        if not desc:
+            continue
+        key = desc.lower()
+        await db.item_catalog.update_one(
+            {"key": key},
+            {
+                "$set": {
+                    "key": key,
+                    "description": desc,
+                    "hsn": it.get("hsn") or "",
+                    "unit": it.get("unit") or "nos",
+                    "rate": float(it.get("rate") or 0),
+                    "updated_at": now_utc().isoformat(),
+                }
+            },
+            upsert=True,
+        )
+
+
+@api_router.get("/items")
+async def search_items(q: Optional[str] = None, user: dict = Depends(get_current_user)):
+    query = {}
+    if q:
+        query["key"] = {"$regex": q.strip().lower(), "$options": "i"}
+    out = []
+    cursor = db.item_catalog.find(query).sort("updated_at", -1).limit(200)
+    async for it in cursor:
+        out.append({
+            "description": it.get("description", ""),
+            "hsn": it.get("hsn", ""),
+            "unit": it.get("unit", "nos"),
+            "rate": it.get("rate", 0),
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Documents (quotations + bills)
 # ---------------------------------------------------------------------------
 @api_router.get("/documents")
@@ -413,6 +463,7 @@ async def create_document(payload: DocumentCreate, user: dict = Depends(get_curr
     data["updated_at"] = data["created_at"]
     res = await db.documents.insert_one(data)
     d = await db.documents.find_one({"_id": res.inserted_id})
+    await remember_items(data.get("items"))
     return serialize_doc(d)
 
 
@@ -438,6 +489,7 @@ async def update_document(doc_id: str, payload: DocumentCreate, user: dict = Dep
     data["updated_at"] = now_utc().isoformat()
     await db.documents.update_one({"_id": oid(doc_id)}, {"$set": data})
     d = await db.documents.find_one({"_id": oid(doc_id)})
+    await remember_items(data.get("items"))
     return serialize_doc(d)
 
 
@@ -524,6 +576,7 @@ async def delete_document(doc_id: str, user: dict = Depends(get_current_user)):
 @app.on_event("startup")
 async def startup():
     await db.users.create_index("email", unique=True)
+    await db.item_catalog.create_index("key", unique=True)
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})
