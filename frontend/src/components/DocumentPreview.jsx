@@ -299,6 +299,9 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
               <li>Subject to Thane Dist. Jurisdiction.</li>
             </ol>
             <div className="text-[11px] mt-1">E. &amp; O. E.</div>
+            <div className="text-right italic mt-2">
+              Receiver&apos;s / Customer&apos;s Seal &amp; Sign.
+            </div>
           </div>
         </div>
 
@@ -328,14 +331,6 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
           </div>
         </div>
       </div>
-      )}
-
-      {/* Bottom seal row – bills / quotations */}
-      {!isChallan && (
-        <div className="grid grid-cols-[1.6fr_1fr] text-[12px] mt-1">
-          <div className="text-center italic">Receiver&apos;s / Customer&apos;s Seal &amp; Sign.</div>
-          <div />
-        </div>
       )}
 
       </>
