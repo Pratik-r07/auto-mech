@@ -163,19 +163,18 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
           {doc.customer_attention ? (
             <div className="leading-snug">Kind Attn: {doc.customer_attention}</div>
           ) : null}
-          <div className="mt-1 leading-snug">
-            <span className="font-semibold">Party GST No.: </span>
-            <span className="underline">{doc.customer_gstin || ""}</span>
-          </div>
+          {!isChallan && (
+            <div className="mt-1 leading-snug">
+              <span className="font-semibold">Party GST No.: </span>
+              <span className="underline">{doc.customer_gstin || ""}</span>
+            </div>
+          )}
         </div>
         {/* Doc details */}
         <div className="p-2 text-[13px]">
           <MetaRow label={isChallan ? "CHALLAN NO." : "INVOICE NO."} value={doc.number} dateLabel="Date" dateValue={doc.date} />
           {isBill && (
             <MetaRow label="Challan No." value={doc.challan_number} dateLabel="Date" dateValue={doc.challan_date} />
-          )}
-          {isChallan && (doc.invoice_number || doc.invoice_date) !== undefined && (
-            <MetaRow label="Invoice No." value={doc.invoice_number} dateLabel="Date" dateValue={doc.invoice_date} />
           )}
           <MetaRow label="P. O. No." value={doc.po_number} dateLabel="Date" dateValue={doc.po_date} />
         </div>
