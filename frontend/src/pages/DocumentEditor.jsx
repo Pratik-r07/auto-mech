@@ -178,7 +178,9 @@ export default function DocumentEditor() {
           <Field label="Name" value={doc.customer_name} onChange={(v) => set("customer_name", v)} testid="customer-name-input" />
           <FieldArea label="Address" value={doc.customer_address} onChange={(v) => set("customer_address", v)} testid="customer-address-input" />
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Party GST No." value={doc.customer_gstin} onChange={(v) => set("customer_gstin", v)} testid="customer-gstin-input" />
+            {!isQuotation && (
+              <Field label="Party GST No." value={doc.customer_gstin} onChange={(v) => set("customer_gstin", v)} testid="customer-gstin-input" />
+            )}
             <Field label="Kind Attn" value={doc.customer_attention} onChange={(v) => set("customer_attention", v)} testid="customer-attention-input" />
           </div>
         </Section>
@@ -196,18 +198,20 @@ export default function DocumentEditor() {
         <Section title="Document Info">
           <div className="grid grid-cols-2 gap-3">
             <Field
-              label={isChallan ? "Challan No." : "Number (auto)"}
+              label={isChallan ? "Challan No." : isQuotation ? "REF No." : "Number (auto)"}
               value={doc.number}
               onChange={(v) => set("number", v)}
-              placeholder={isChallan ? "Leave blank for auto" : "Auto-generated"}
+              placeholder={isChallan ? "Leave blank for auto" : isQuotation ? "e.g. AMSS/25-26/012" : "Auto-generated"}
               testid="number-input"
             />
             <Field label="Date" value={doc.date} onChange={(v) => set("date", v)} placeholder="dd/mm/yyyy" testid="date-input" />
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="P.O. No." value={doc.po_number} onChange={(v) => set("po_number", v)} testid="po-number-input" />
-            <Field label="P.O. Date" value={doc.po_date} onChange={(v) => set("po_date", v)} placeholder="dd/mm/yyyy" testid="po-date-input" />
-          </div>
+          {!isQuotation && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="P.O. No." value={doc.po_number} onChange={(v) => set("po_number", v)} testid="po-number-input" />
+              <Field label="P.O. Date" value={doc.po_date} onChange={(v) => set("po_date", v)} placeholder="dd/mm/yyyy" testid="po-date-input" />
+            </div>
+          )}
           {isBill && (
             <div className="grid grid-cols-2 gap-3">
               <Field label="Challan No." value={doc.challan_number} onChange={(v) => set("challan_number", v)} testid="challan-number-input" />
@@ -297,25 +301,27 @@ export default function DocumentEditor() {
           </Button>
         </Section>
 
-        {/* Tax + Discount – hidden for challan */}
+        {/* Tax + Discount – hidden for challan; quotation only gets Discount (GST is stated in its own Terms section) */}
         {!isChallan && (
-          <Section title="Tax & Discount">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5 block">GST Type</Label>
-                <Select value={doc.gst_type} onValueChange={(v) => set("gst_type", v)}>
-                  <SelectTrigger data-testid="gst-type-select" className="border-slate-300 focus:ring-2 focus:ring-orange-500">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="cgst_sgst">CGST + SGST (intra-state)</SelectItem>
-                    <SelectItem value="igst">IGST (inter-state)</SelectItem>
-                    <SelectItem value="none">No Tax</SelectItem>
-                  </SelectContent>
-                </Select>
+          <Section title={isQuotation ? "Discount" : "Tax & Discount"}>
+            {!isQuotation && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-1.5 block">GST Type</Label>
+                  <Select value={doc.gst_type} onValueChange={(v) => set("gst_type", v)}>
+                    <SelectTrigger data-testid="gst-type-select" className="border-slate-300 focus:ring-2 focus:ring-orange-500">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="cgst_sgst">CGST + SGST (intra-state)</SelectItem>
+                      <SelectItem value="igst">IGST (inter-state)</SelectItem>
+                      <SelectItem value="none">No Tax</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <MiniField label="GST Rate %" type="number" value={doc.gst_rate} onChange={(v) => set("gst_rate", v)} testid="gst-rate-input" />
               </div>
-              <MiniField label="GST Rate %" type="number" value={doc.gst_rate} onChange={(v) => set("gst_rate", v)} testid="gst-rate-input" />
-            </div>
+            )}
             <div className="rounded-md border border-orange-200 bg-orange-50 p-3">
               <Label className="text-xs font-bold uppercase tracking-wider text-orange-700 mb-1.5 block">
                 Discount %

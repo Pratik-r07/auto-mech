@@ -53,18 +53,6 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
       className="bg-white text-slate-900 mx-auto"
       style={{ width: "210mm", minHeight: "297mm", padding: "10mm", fontFamily: "'Times New Roman', 'Liberation Serif', serif" }}
     >
-      {/* Challan title above the letterhead – matches the physical challan book */}
-      {isChallan && showHeader && (
-        <div className="text-center mb-2">
-          <span
-            className="font-bold underline"
-            style={{ fontSize: "16px", letterSpacing: "0.5px" }}
-          >
-            DELIVERY CHALLAN
-          </span>
-        </div>
-      )}
-
       {/* Letterhead */}
       {showHeader && (
         <div className="pb-2">
@@ -125,7 +113,7 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
                   CONTACT NO: {company.phone}
                 </div>
               ) : null}
-              {company?.gstin ? (
+              {company?.gstin && !isQuotation ? (
                 <div className="text-[12px] font-semibold text-slate-900 mt-1">GSTIN: {company.gstin}</div>
               ) : null}
             </div>
@@ -145,12 +133,12 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
       ) : (
       <>
       {/* Title bar */}
-      <div className={`mt-2 border border-slate-900 text-center py-1 font-bold text-[13px] tracking-[0.15em] ${showHeader ? "" : "mt-0"} ${isChallan ? "hidden" : ""}`}>
+      <div className={`mt-2 border border-slate-900 text-center py-1 font-bold text-[13px] tracking-[0.15em] ${showHeader ? "" : "mt-0"}`}>
         {title}
       </div>
 
       {/* Meta – Buyer + document details */}
-      <div className={`grid grid-cols-2 ${isChallan ? "border" : "border-x border-b"} border-slate-900 text-[13px]`}>
+      <div className={`grid grid-cols-2 border-x border-b border-slate-900 text-[13px]`}>
         {/* Buyer */}
         <div className="p-2 border-r border-slate-900 min-h-[130px]">
           <div className="leading-snug">
