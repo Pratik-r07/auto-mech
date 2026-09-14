@@ -63,7 +63,6 @@ export default function Settings() {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <F label="GSTIN" value={c.gstin} onChange={(v) => set("gstin", v)} testid="company-gstin" />
-            <F label="Logo URL" value={c.logo} onChange={(v) => set("logo", v)} testid="company-logo" />
           </div>
           <F label="Authorized Signatory" value={c.signatory} onChange={(v) => set("signatory", v)} testid="company-signatory" />
         </Group>
