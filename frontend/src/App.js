@@ -8,6 +8,7 @@ import Dashboard from "@/pages/Dashboard";
 import DocumentList from "@/pages/DocumentList";
 import DocumentEditor from "@/pages/DocumentEditor";
 import DocumentView from "@/pages/DocumentView";
+import BulkPrint from "@/pages/Bulkprint";
 import Clients from "@/pages/Clients";
 import Settings from "@/pages/Settings";
 
@@ -48,6 +49,7 @@ function App() {
               <Route path="/settings" element={<Settings />} />
             </Route>
             <Route path="/view/:id" element={<ProtectedRoute><DocumentView /></ProtectedRoute>} />
+            <Route path="/bulk-print/:docType" element={<ProtectedRoute><BulkPrint /></ProtectedRoute>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>

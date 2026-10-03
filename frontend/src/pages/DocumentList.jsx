@@ -7,7 +7,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Plus, Eye, PencilSimple, Trash, ArrowsClockwise, FileText, Receipt, MagnifyingGlass, Truck } from "@phosphor-icons/react";
+import { Plus, Eye, PencilSimple, Trash, ArrowsClockwise, FileText, Receipt, MagnifyingGlass, Truck, DownloadSimple } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
 const money = (n) =>
@@ -18,6 +18,7 @@ export default function DocumentList({ docType }) {
   const [docs, setDocs] = useState([]);
   const [search, setSearch] = useState("");
   const [toDelete, setToDelete] = useState(null);
+  const [selected, setSelected] = useState([]);
   const isBill = docType === "bill";
   const isChallan = docType === "challan";
   const title = isBill ? "Bills / Invoices" : isChallan ? "Delivery Challans" : "Quotations";
@@ -26,6 +27,7 @@ export default function DocumentList({ docType }) {
   const load = () => api.get(`/documents?doc_type=${docType}`).then((r) => setDocs(r.data));
   useEffect(() => {
     load();
+    setSelected([]);
     // eslint-disable-next-line
   }, [docType]);
 
@@ -54,6 +56,26 @@ export default function DocumentList({ docType }) {
       d.customer_name?.toLowerCase().includes(search.toLowerCase())
   );
 
+  const allFilteredSelected = filtered.length > 0 && filtered.every((d) => selected.includes(d.id));
+
+  const toggleAll = () => {
+    if (allFilteredSelected) {
+      setSelected((s) => s.filter((id) => !filtered.some((d) => d.id === id)));
+    } else {
+      setSelected((s) => Array.from(new Set([...s, ...filtered.map((d) => d.id)])));
+    }
+  };
+
+  const toggleOne = (id) => {
+    setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  };
+
+  const downloadSelected = () => {
+    if (selected.length === 0) return;
+    const url = `/bulk-print/${docType}?ids=${selected.join(",")}`;
+    window.open(url, "_blank");
+  };
+
   return (
     <div className="p-4 sm:p-8">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
@@ -64,13 +86,25 @@ export default function DocumentList({ docType }) {
             {title}
           </h1>
         </div>
-        <Button
-          data-testid="create-document-button"
-          onClick={() => navigate(`/new/${docType}`)}
-          className="bg-orange-600 hover:bg-orange-700 text-white rounded-md transition-colors duration-150"
-        >
-          <Plus size={16} weight="bold" className="mr-2" /> New {singular}
-        </Button>
+        <div className="flex items-center gap-2">
+          {selected.length > 0 && (
+            <Button
+              data-testid="download-selected-button"
+              onClick={downloadSelected}
+              variant="outline"
+              className="border-orange-300 text-orange-700 hover:bg-orange-50 rounded-md transition-colors duration-150"
+            >
+              <DownloadSimple size={16} weight="bold" className="mr-2" /> Download Selected ({selected.length})
+            </Button>
+          )}
+          <Button
+            data-testid="create-document-button"
+            onClick={() => navigate(`/new/${docType}`)}
+            className="bg-orange-600 hover:bg-orange-700 text-white rounded-md transition-colors duration-150"
+          >
+            <Plus size={16} weight="bold" className="mr-2" /> New {singular}
+          </Button>
+        </div>
       </div>
 
       <div className="relative mb-4 max-w-sm">
@@ -93,6 +127,15 @@ export default function DocumentList({ docType }) {
           <table className="w-full min-w-[640px] text-sm">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50">
+                <th className="px-4 py-3 w-10">
+                  <input
+                    type="checkbox"
+                    data-testid="select-all-checkbox"
+                    checked={allFilteredSelected}
+                    onChange={toggleAll}
+                    className="w-4 h-4 rounded border-slate-300 text-orange-600 focus:ring-orange-500"
+                  />
+                </th>
                 {(isChallan ? ["Number", "Customer", "Date", "PO No.", ""] : ["Number", "Customer", "Date", "Amount", ""]).map((h) => (
                   <th key={h} className="text-left px-4 py-3 text-xs font-bold uppercase tracking-wider text-slate-500">
                     {h}
@@ -107,6 +150,15 @@ export default function DocumentList({ docType }) {
                   data-testid={`doc-row-${d.id}`}
                   className="border-b border-slate-100 last:border-0 hover:bg-slate-50 transition-colors duration-150"
                 >
+                  <td className="px-4 py-3">
+                    <input
+                      type="checkbox"
+                      data-testid={`select-${d.id}`}
+                      checked={selected.includes(d.id)}
+                      onChange={() => toggleOne(d.id)}
+                      className="w-4 h-4 rounded border-slate-300 text-orange-600 focus:ring-orange-500"
+                    />
+                  </td>
                   <td className="px-4 py-3 font-mono-num font-semibold text-slate-900">{d.number}</td>
                   <td className="px-4 py-3 text-slate-700">{d.customer_name || "—"}</td>
                   <td className="px-4 py-3 font-mono-num text-slate-600">{d.date}</td>
