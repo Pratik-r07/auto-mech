@@ -106,6 +106,7 @@ class DocumentBase(BaseModel):
     customer_name: str = ""
     customer_address: str = ""
     customer_gstin: str = ""
+    udyam_number: str = ""
     customer_attention: str = ""
     # items
     items: List[LineItem] = Field(default_factory=list)

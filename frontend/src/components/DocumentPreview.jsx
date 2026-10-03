@@ -249,9 +249,12 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
       <div className="grid grid-cols-[1.6fr_1fr] border-x border-b border-slate-900 text-[13px]">
         {/* LEFT column */}
         <div className="border-r border-slate-900">
-          <div className="border-b border-slate-900 px-2 py-1 font-semibold">
-              GSTIN NO. : <span className="tracking-wider">{company?.gstin || "27AHOPR6367G1ZO"}</span>
-            </div>
+        <div className="border-b border-slate-900 px-2 py-1 font-semibold">
+           GSTIN NO. : <span className="tracking-wider">{company?.gstin || "27AHOPR6367G1ZO"}</span>
+           {company?.udyam_number ? (
+          <div className="font-normal mt-0.5">UDYAM REGISTRATION NO. : <span className="tracking-wider">{company.udyam_number}</span></div>
+             ) : null}
+        </div>
           <div className="border-b border-slate-900 px-2 py-1 min-h-[48px]">
               <span className="font-semibold">Total Amount in Words : </span>
               <span className="italic">{numberToWordsINR(t.grand_total)}</span>
