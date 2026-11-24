@@ -10,6 +10,7 @@ import DocumentEditor from "@/pages/DocumentEditor";
 import DocumentView from "@/pages/DocumentView";
 import BulkPrint from "@/pages/Bulkprint";
 import Clients from "@/pages/Clients";
+import Files from "@/pages/Files";
 import Settings from "@/pages/Settings";
 
 function ProtectedRoute({ children }) {
@@ -46,6 +47,9 @@ function App() {
               <Route path="/new/:docType" element={<DocumentEditor />} />
               <Route path="/edit/:id" element={<DocumentEditor />} />
               <Route path="/clients" element={<Clients />} />
+              <Route path="/files" element={<Files />} />
+              <Route path="/files/:clientId" element={<Files />} />
+              <Route path="/files/:clientId/:category" element={<Files />} />
               <Route path="/settings" element={<Settings />} />
             </Route>
             <Route path="/view/:id" element={<ProtectedRoute><DocumentView /></ProtectedRoute>} />

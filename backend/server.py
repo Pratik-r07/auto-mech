@@ -5,9 +5,10 @@ import os
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, Request, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, Request, HTTPException, Depends, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 from pydantic import BaseModel, Field, EmailStr, BeforeValidator, ConfigDict
 from typing import List, Optional, Annotated, Literal
 from datetime import datetime, timezone, timedelta
@@ -15,6 +16,7 @@ from bson import ObjectId
 import bcrypt
 import jwt
 import logging
+from urllib.parse import quote
 
 # ---------------------------------------------------------------------------
 # DB
@@ -22,6 +24,15 @@ import logging
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+
+# Client files (PDFs, photos, etc.) are stored inside MongoDB using GridFS,
+# so no extra storage service is needed. Each file carries its client_id.
+fs_bucket = AsyncIOMotorGridFSBucket(db, bucket_name="client_files")
+FILES_COLL = db["client_files.files"]
+MAX_FILE_BYTES = 15 * 1024 * 1024  # 15 MB per file
+# Sub-folders inside every client folder. Files saved before sub-folders existed
+# have no category and show up under "other".
+FILE_CATEGORIES = ("bill", "challan", "quotation")
 
 JWT_ALGORITHM = "HS256"
 
@@ -353,6 +364,12 @@ async def update_client(client_id: str, payload: ClientModel, user: dict = Depen
 
 @api_router.delete("/clients/{client_id}")
 async def delete_client(client_id: str, user: dict = Depends(get_current_user)):
+    file_count = await FILES_COLL.count_documents({"metadata.client_id": client_id})
+    if file_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This client's folder still has {file_count} file(s). Delete the files first.",
+        )
     res = await db.clients.delete_one({"_id": oid(client_id)})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Client not found")
@@ -572,12 +589,145 @@ async def delete_document(doc_id: str, user: dict = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
+# Client files — one "folder" per client
+# ---------------------------------------------------------------------------
+def serialize_file(f: dict) -> dict:
+    meta = f.get("metadata") or {}
+    uploaded = f.get("uploadDate")
+    return {
+        "id": str(f["_id"]),
+        "client_id": meta.get("client_id", ""),
+        "category": meta.get("category") or "other",
+        "filename": f.get("filename", ""),
+        "size": f.get("length", 0),
+        "content_type": meta.get("content_type", "application/octet-stream"),
+        "uploaded_at": uploaded.isoformat() if uploaded else "",
+    }
+
+
+@api_router.get("/files/summary")
+async def files_summary(user: dict = Depends(get_current_user)):
+    """Per client: total file count/size plus a breakdown by sub-folder."""
+    pipeline = [
+        {"$group": {
+            "_id": {"client": "$metadata.client_id", "category": "$metadata.category"},
+            "count": {"$sum": 1},
+            "size": {"$sum": "$length"},
+        }}
+    ]
+    out = {}
+    async for row in FILES_COLL.aggregate(pipeline):
+        client_id = row["_id"].get("client")
+        if not client_id:
+            continue
+        cat = row["_id"].get("category") or "other"
+        entry = out.setdefault(client_id, {"count": 0, "size": 0, "categories": {}})
+        entry["count"] += row["count"]
+        entry["size"] += row["size"]
+        bucket = entry["categories"].setdefault(cat, {"count": 0, "size": 0})
+        bucket["count"] += row["count"]
+        bucket["size"] += row["size"]
+    return out
+
+
+@api_router.get("/clients/{client_id}/files")
+async def list_client_files(
+    client_id: str,
+    category: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    query = {"metadata.client_id": client_id}
+    if category == "other":
+        query["$or"] = [
+            {"metadata.category": {"$exists": False}},
+            {"metadata.category": None},
+            {"metadata.category": "other"},
+        ]
+    elif category:
+        if category not in FILE_CATEGORIES:
+            raise HTTPException(status_code=400, detail="Invalid folder")
+        query["metadata.category"] = category
+    out = []
+    async for f in FILES_COLL.find(query).sort("uploadDate", -1):
+        out.append(serialize_file(f))
+    return out
+
+
+@api_router.post("/clients/{client_id}/files")
+async def upload_client_files(
+    client_id: str,
+    category: str = Form(...),
+    files: List[UploadFile] = File(...),
+    user: dict = Depends(get_current_user),
+):
+    if category not in FILE_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Choose a sub-folder: bill, challan or quotation")
+    if not await db.clients.find_one({"_id": oid(client_id)}):
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    saved, rejected = [], []
+    for up in files:
+        name = os.path.basename(up.filename or "file").strip() or "file"
+        data = await up.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            rejected.append(f"{name} (larger than {MAX_FILE_BYTES // (1024 * 1024)} MB)")
+            continue
+        if not data:
+            rejected.append(f"{name} (empty file)")
+            continue
+        file_id = await fs_bucket.upload_from_stream(
+            name,
+            data,
+            metadata={
+                "client_id": client_id,
+                "category": category,
+                "content_type": up.content_type or "application/octet-stream",
+                "uploaded_by": user.get("email", ""),
+            },
+        )
+        f = await FILES_COLL.find_one({"_id": file_id})
+        saved.append(serialize_file(f))
+    return {"saved": saved, "rejected": rejected}
+
+
+@api_router.get("/files/{file_id}/download")
+async def download_file(file_id: str, user: dict = Depends(get_current_user)):
+    f = await FILES_COLL.find_one({"_id": oid(file_id)})
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+    info = serialize_file(f)
+    stream = await fs_bucket.open_download_stream(oid(file_id))
+
+    async def body():
+        while True:
+            chunk = await stream.read(256 * 1024)
+            if not chunk:
+                break
+            yield chunk
+
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(info['filename'])}",
+        "Content-Length": str(info["size"]),
+    }
+    return StreamingResponse(body(), media_type=info["content_type"], headers=headers)
+
+
+@api_router.delete("/files/{file_id}")
+async def delete_file(file_id: str, user: dict = Depends(get_current_user)):
+    if not await FILES_COLL.find_one({"_id": oid(file_id)}):
+        raise HTTPException(status_code=404, detail="File not found")
+    await fs_bucket.delete(oid(file_id))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
     await db.users.create_index("email", unique=True)
     await db.item_catalog.create_index("key", unique=True)
+    await FILES_COLL.create_index("metadata.client_id")
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})

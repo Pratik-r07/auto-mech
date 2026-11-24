@@ -11,6 +11,7 @@ import {
   SignOut,
   List,
   Truck,
+  FolderSimple,
 } from "@phosphor-icons/react";
 
 const nav = [
@@ -19,6 +20,7 @@ const nav = [
   { to: "/bills", label: "Bills / Invoices", icon: Receipt },
   { to: "/challans", label: "Delivery Challans", icon: Truck },
   { to: "/clients", label: "Clients", icon: UsersThree },
+  { to: "/files", label: "Client Files", icon: FolderSimple },
   { to: "/settings", label: "Settings", icon: GearSix },
 ];
 
