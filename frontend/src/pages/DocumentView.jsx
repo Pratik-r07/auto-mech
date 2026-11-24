@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Printer, PencilSimple, ArrowLeft, Truck } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import { docFileName } from "@/lib/pdfName";
 
 export default function DocumentView() {
   const { id } = useParams();
@@ -18,6 +19,17 @@ export default function DocumentView() {
     api.get(`/documents/${id}`).then((r) => setDoc(r.data));
     api.get("/company").then((r) => setCompany(r.data));
   }, [id]);
+
+  // Browsers use the page title as the default file name in "Save as PDF",
+  // so set it to "<Client>_<Type>_<Number>" while this document is open.
+  useEffect(() => {
+    if (!doc) return undefined;
+    const previousTitle = document.title;
+    document.title = docFileName(doc);
+    return () => {
+      document.title = previousTitle;
+    };
+  }, [doc]);
 
   if (!doc)
     return (

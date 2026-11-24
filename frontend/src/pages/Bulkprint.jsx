@@ -5,6 +5,7 @@ import DocumentPreview from "@/components/DocumentPreview";
 import { Button } from "@/components/ui/button";
 import { DownloadSimple } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import { bulkFileName } from "@/lib/pdfName";
 
 export default function BulkPrint() {
   const { docType } = useParams();
@@ -69,7 +70,7 @@ export default function BulkPrint() {
         pdf.addImage(imgData, "JPEG", 0, 0, pageWidth, pageHeight);
       }
 
-      const filename = `${docType}s-${docs.map((d) => d.number).join("_")}.pdf`;
+      const filename = `${bulkFileName(docs, docType)}.pdf`;
       pdf.save(filename);
     } catch (err) {
       toast.error("Could not generate PDF: " + err.message);
