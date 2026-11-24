@@ -12,6 +12,7 @@ import {
   MagnifyingGlass, FilePdf, FileImage, FileText, File as FileIcon, Receipt, Truck,
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import { saveDocumentToClientFolder } from "@/lib/saveToClientFolder";
 
 const MAX_MB = 15;
 
@@ -52,8 +53,9 @@ function FolderGrid() {
   const [summary, setSummary] = useState({});
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
+  const [syncing, setSyncing] = useState(null); // null | "done / total" text
 
-  useEffect(() => {
+  const load = () =>
     Promise.all([api.get("/clients"), api.get("/files/summary")])
       .then(([c, s]) => {
         setClients(c.data);
@@ -61,7 +63,52 @@ function FolderGrid() {
       })
       .catch((e) => toast.error(formatApiError(e.response?.data?.detail) || e.message))
       .finally(() => setLoading(false));
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line
   }, []);
+
+  // One-time catch-up: put a PDF of every earlier bill / quotation / challan that is
+  // not in a client folder yet into the right folder. Safe to run again: documents
+  // that already have a PDF are skipped.
+  const addEarlierDocuments = async () => {
+    setSyncing("Checking…");
+    try {
+      const [docsRes, filedRes, companyRes] = await Promise.all([
+        api.get("/documents"),
+        api.get("/documents/filed-ids"),
+        api.get("/company"),
+      ]);
+      const filed = new Set(filedRes.data);
+      const todo = docsRes.data.filter((d) => !filed.has(d.id) && (d.customer_name || "").trim());
+      if (todo.length === 0) {
+        toast.success("All documents are already in their client folders");
+        return;
+      }
+      let done = 0;
+      const failed = [];
+      for (const d of todo) {
+        setSyncing(`${done} / ${todo.length}`);
+        try {
+          await saveDocumentToClientFolder(d, companyRes.data);
+        } catch (e) {
+          failed.push(d.number || d.id);
+        }
+        done += 1;
+      }
+      if (failed.length) {
+        toast.error(`${done - failed.length} added, ${failed.length} failed: ${failed.join(", ")}`);
+      } else {
+        toast.success(`${done} earlier document${done === 1 ? "" : "s"} added to client folders`);
+      }
+      await load();
+    } catch (e) {
+      toast.error(formatApiError(e.response?.data?.detail) || e.message);
+    } finally {
+      setSyncing(null);
+    }
+  };
 
   const filtered = useMemo(
     () => clients.filter((c) => c.name.toLowerCase().includes(q.trim().toLowerCase())),
@@ -78,6 +125,16 @@ function FolderGrid() {
         <p className="text-sm text-slate-500 mt-2">
           One folder per client. Open a folder to upload and keep that client's files together.
         </p>
+        <Button
+          data-testid="add-earlier-documents-button"
+          onClick={addEarlierDocuments}
+          disabled={!!syncing}
+          variant="outline"
+          className="mt-3 border-slate-300 text-slate-700 hover:bg-slate-50 rounded-md"
+        >
+          <UploadSimple size={16} weight="bold" className="mr-2" />
+          {syncing ? `Adding earlier documents… ${syncing}` : "Add earlier documents to client folders"}
+        </Button>
       </div>
 
       <div className="relative mb-6 max-w-sm">

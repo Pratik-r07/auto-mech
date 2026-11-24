@@ -16,6 +16,7 @@ from bson import ObjectId
 import bcrypt
 import jwt
 import logging
+import re
 from urllib.parse import quote
 
 # ---------------------------------------------------------------------------
@@ -455,6 +456,13 @@ async def stats(user: dict = Depends(get_current_user)):
     }
 
 
+@api_router.get("/documents/filed-ids")
+async def filed_document_ids(user: dict = Depends(get_current_user)):
+    """Ids of documents that already have a PDF copy in a client folder."""
+    ids = await FILES_COLL.distinct("metadata.document_id")
+    return [i for i in ids if i]
+
+
 @api_router.get("/documents/{doc_id}")
 async def get_document(doc_id: str, user: dict = Depends(get_current_user)):
     d = await db.documents.find_one({"_id": oid(doc_id)})
@@ -580,6 +588,49 @@ async def convert_to_challan(doc_id: str, user: dict = Depends(get_current_user)
     return serialize_doc(created)
 
 
+@api_router.post("/documents/{doc_id}/file")
+async def save_document_file(
+    doc_id: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    """Store the PDF of a saved document in its client's folder (replacing the
+    previous PDF of the same document, if any)."""
+    d = await db.documents.find_one({"_id": oid(doc_id)})
+    if not d:
+        raise HTTPException(status_code=404, detail="Document not found")
+    category = d.get("doc_type")
+    if category not in FILE_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Unsupported document type")
+
+    data = await file.read(MAX_FILE_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(data) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=400, detail="PDF is larger than the 15 MB limit")
+
+    client_id = await resolve_client_for_document(d)
+
+    # Drop the earlier copy of this same document (also covers a changed customer name)
+    async for old in FILES_COLL.find({"metadata.document_id": doc_id}):
+        await fs_bucket.delete(old["_id"])
+
+    file_id = await fs_bucket.upload_from_stream(
+        document_pdf_name(d),
+        data,
+        metadata={
+            "client_id": client_id,
+            "category": category,
+            "content_type": "application/pdf",
+            "uploaded_by": user.get("email", ""),
+            "document_id": doc_id,
+        },
+    )
+    await db.documents.update_one({"_id": d["_id"]}, {"$set": {"client_id": client_id}})
+    f = await FILES_COLL.find_one({"_id": file_id})
+    return {"file": serialize_file(f), "client_id": client_id}
+
+
 @api_router.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str, user: dict = Depends(get_current_user)):
     res = await db.documents.delete_one({"_id": oid(doc_id)})
@@ -587,6 +638,54 @@ async def delete_document(doc_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Document not found")
     return {"ok": True}
 
+
+
+# ---------------------------------------------------------------------------
+# Saved document -> client folder
+# Every saved bill / quotation / challan gets a PDF copy placed in the matching
+# client's folder (sub-folder = bill / quotation / challan). Saving the same
+# document again replaces its earlier PDF instead of piling up duplicates.
+# ---------------------------------------------------------------------------
+TYPE_LABEL = {"bill": "Bill", "quotation": "Quotation", "challan": "Challan"}
+
+
+def clean_for_filename(s: str) -> str:
+    s = re.sub(r'[\\/:*?"<>|]+', "-", str(s or ""))
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def document_pdf_name(d: dict) -> str:
+    """Same pattern as the frontend: <Client>_<Type>_<Number>.pdf"""
+    parts = [
+        clean_for_filename(d.get("customer_name")) or "Client",
+        TYPE_LABEL.get(d.get("doc_type"), "Document"),
+        clean_for_filename(d.get("number")),
+    ]
+    return "_".join(p for p in parts if p) + ".pdf"
+
+
+async def resolve_client_for_document(d: dict) -> str:
+    """Find the client whose folder this document belongs to (matched by customer name,
+    ignoring case/extra spaces). If there is no such client yet, create one from the
+    details on the document so the folder exists."""
+    name = re.sub(r"\s+", " ", (d.get("customer_name") or "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Document has no customer name")
+    existing = await db.clients.find_one(
+        {"name": {"$regex": f"^\\s*{re.escape(name)}\\s*$", "$options": "i"}}
+    )
+    if existing:
+        return str(existing["_id"])
+    res = await db.clients.insert_one({
+        "name": name,
+        "address": d.get("customer_address", "") or "",
+        "gstin": d.get("customer_gstin", "") or "",
+        "attention": d.get("customer_attention", "") or "",
+        "phone": "",
+        "email": "",
+        "created_at": now_utc().isoformat(),
+    })
+    return str(res.inserted_id)
 
 # ---------------------------------------------------------------------------
 # Client files — one "folder" per client
@@ -728,6 +827,7 @@ async def startup():
     await db.users.create_index("email", unique=True)
     await db.item_catalog.create_index("key", unique=True)
     await FILES_COLL.create_index("metadata.client_id")
+    await FILES_COLL.create_index("metadata.document_id")
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})

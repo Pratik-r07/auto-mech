@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/popover";
 import { Plus, Trash, FloppyDisk, ArrowLeft, CaretDown } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import { saveDocumentToClientFolder } from "@/lib/saveToClientFolder";
 
 const DEFAULT_TERMS = {
   payment: "After delivery.",
@@ -125,6 +126,17 @@ export default function DocumentEditor() {
         result = (await api.post("/documents", doc)).data;
       }
       toast.success("Saved");
+      // Put a PDF copy straight into this client's folder (bill / challan / quotation sub-folder).
+      // The document itself is already saved, so a failure here only shows a warning.
+      try {
+        await saveDocumentToClientFolder(result, company);
+        toast.success(`Copy added to ${result.customer_name}'s ${result.doc_type} folder`);
+      } catch (folderErr) {
+        toast.error(
+          "Saved, but the copy could not be added to the client folder: " +
+            (formatApiError(folderErr.response?.data?.detail) || folderErr.message)
+        );
+      }
       if (thenView) navigate(`/view/${result.id}`);
       else navigate(isBill ? "/bills" : isChallan ? "/challans" : "/quotations");
     } catch (err) {
