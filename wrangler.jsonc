@@ -1,0 +1,11 @@
+{
+  // Cloudflare Workers config for Auto-Mech (React single-page app)
+  "name": "auto-mech",
+  "compatibility_date": "2025-09-01",
+  "assets": {
+    "directory": "./frontend/build",
+    // Any URL that is not a real file (e.g. /files, /documents/123) serves index.html,
+    // so refreshing the page lets React Router show the right screen instead of "Not found".
+    "not_found_handling": "single-page-application"
+  }
+}
