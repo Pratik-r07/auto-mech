@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { Fragment, useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import api, { formatApiError } from "@/lib/api";
 import DocumentPreview from "@/components/DocumentPreview";
@@ -12,9 +12,8 @@ import {
 import {
   Popover, PopoverContent, PopoverTrigger,
 } from "@/components/ui/popover";
-import { Plus, Trash, FloppyDisk, ArrowLeft, CaretDown } from "@phosphor-icons/react";
+import { Plus, Trash, FloppyDisk, ArrowLeft, CaretDown, DotsSixVertical, TextT } from "@phosphor-icons/react";
 import { toast } from "sonner";
-import { saveDocumentToClientFolder } from "@/lib/saveToClientFolder";
 
 const DEFAULT_TERMS = {
   payment: "After delivery.",
@@ -23,6 +22,14 @@ const DEFAULT_TERMS = {
   freight: "Extra to your account.",
   guarantee: "To your satisfaction.",
 };
+
+// Rows can be normal items or section headers. Each row gets a temporary "uid" so React keeps
+// the right row when rows are moved around (the server ignores it).
+let uidCounter = 0;
+const newUid = () => `r${Date.now().toString(36)}${(uidCounter += 1)}`;
+const blankItem = () => ({ uid: newUid(), kind: "item", description: "", hsn: "", qty: 1, unit: "Nos", rate: 0 });
+const blankHeader = () => ({ uid: newUid(), kind: "header", description: "", hsn: "", qty: 0, unit: "", rate: 0 });
+const withUids = (items) => (items || []).map((it) => ({ ...it, kind: it.kind || "item", uid: it.uid || newUid() }));
 
 const blank = (docType) => ({
   doc_type: docType || "quotation",
@@ -41,7 +48,7 @@ const blank = (docType) => ({
   customer_address: "",
   customer_gstin: "",
   customer_attention: "",
-  items: [{ description: "", hsn: "", qty: 1, unit: "Nos", rate: 0 }],
+  items: [blankItem()],
   gst_type: "cgst_sgst",
   gst_rate: 18,
   discount_percent: 0,
@@ -59,6 +66,9 @@ export default function DocumentEditor() {
   const [saving, setSaving] = useState(false);
   const [catalog, setCatalog] = useState([]);
   const [openSuggestFor, setOpenSuggestFor] = useState(null);
+  const [drag, setDrag] = useState(null); // while dragging a row: { from, to, dy }
+  const dragRef = useRef(null);
+  const listRef = useRef(null);
   const editing = !!id;
   const isBill = doc.doc_type === "bill";
   const isChallan = doc.doc_type === "challan";
@@ -69,7 +79,7 @@ export default function DocumentEditor() {
     api.get("/clients").then((r) => setClients(r.data));
     api.get("/items").then((r) => setCatalog(r.data)).catch(() => {});
     if (id) {
-      api.get(`/documents/${id}`).then((r) => setDoc(r.data));
+      api.get(`/documents/${id}`).then((r) => setDoc({ ...r.data, items: withUids(r.data.items) }));
     } else if (docType !== "challan") {
       api.get("/company").then((r) => {
         const t = r.data.default_terms && Object.keys(r.data.default_terms).length ? r.data.default_terms : DEFAULT_TERMS;
@@ -92,12 +102,107 @@ export default function DocumentEditor() {
     }));
     setOpenSuggestFor(null);
   };
-  const addItem = () =>
-    setDoc((d) => ({
-      ...d,
-      items: [...d.items, { description: "", hsn: "", qty: 1, unit: "Nos", rate: 0 }],
-    }));
+  // Insert a new item or section header at position `index` (default: the end)
+  const insertRow = (kind, index) => {
+    setOpenSuggestFor(null);
+    setDoc((d) => {
+      const at = index === undefined ? d.items.length : index;
+      const items = [...d.items];
+      items.splice(at, 0, kind === "header" ? blankHeader() : blankItem());
+      return { ...d, items };
+    });
+  };
   const removeItem = (i) => setDoc((d) => ({ ...d, items: d.items.filter((_, idx) => idx !== i) }));
+  // Move the row at position `from` so that it ends up at position `to`
+  const moveItem = (from, to) => {
+    setOpenSuggestFor(null);
+    setDoc((d) => {
+      const target = Math.max(0, Math.min(d.items.length - 1, to));
+      if (from === target || from < 0 || from >= d.items.length) return d;
+      const items = [...d.items];
+      const [row] = items.splice(from, 1);
+      items.splice(target, 0, row);
+      return { ...d, items };
+    });
+  };
+
+  /* ---- Drag a row up or down by its handle (works with mouse AND finger) ----
+     The row follows the pointer; nothing moves in the list until you let go, so the drag
+     never gets interrupted. The orange line shows where the row will land. */
+  const rowCards = () => Array.from(listRef.current?.querySelectorAll("[data-item-card]") || []);
+  const scrollerOf = (node) => {
+    for (let n = node && node.parentElement; n && n !== document.body; n = n.parentElement) {
+      const oy = window.getComputedStyle(n).overflowY;
+      if ((oy === "auto" || oy === "scroll") && n.scrollHeight > n.clientHeight) return n;
+    }
+    return null; // the whole page scrolls
+  };
+  const updateDrag = () => {
+    const d = dragRef.current;
+    if (!d) return;
+    const cards = rowCards();
+    const el = cards[d.from];
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const restingTop = rect.top - d.dy;                 // where the row sits without the drag offset
+    const dy = d.pointerY - d.grab - restingTop;
+    d.dy = dy;
+    const centre = d.pointerY - d.grab + rect.height / 2;
+    let to = 0;
+    cards.forEach((c, idx) => {
+      if (idx === d.from) return;
+      const r = c.getBoundingClientRect();
+      if (r.top + r.height / 2 < centre) to += 1;
+    });
+    d.to = to;
+    setDrag({ from: d.from, to, dy });
+  };
+  const dragLoop = () => {
+    // scroll the page/pane when the row is held near its top or bottom edge
+    const d = dragRef.current;
+    if (!d) return;
+    const area = d.scroller ? d.scroller.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+    const edge = 70;
+    const max = 18;
+    let v = 0;
+    if (d.pointerY < area.top + edge) v = -max * (1 - Math.max(0, d.pointerY - area.top) / edge);
+    else if (d.pointerY > area.bottom - edge) v = max * (1 - Math.max(0, area.bottom - d.pointerY) / edge);
+    if (v) {
+      if (d.scroller) d.scroller.scrollTop += v;
+      else window.scrollBy(0, v);
+      updateDrag();
+    }
+    d.raf = requestAnimationFrame(dragLoop);
+  };
+  const startDrag = (e, i) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    const el = rowCards()[i];
+    if (!el) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    dragRef.current = {
+      from: i, to: i, dy: 0, pointerY: e.clientY,
+      grab: e.clientY - el.getBoundingClientRect().top,
+      scroller: scrollerOf(listRef.current), raf: 0,
+    };
+    setOpenSuggestFor(null);
+    setDrag({ from: i, to: i, dy: 0 });
+    dragRef.current.raf = requestAnimationFrame(dragLoop);
+  };
+  const moveDrag = (e) => {
+    if (!dragRef.current) return;
+    dragRef.current.pointerY = e.clientY;
+    updateDrag();
+  };
+  const endDrag = (commit) => {
+    const d = dragRef.current;
+    if (!d) return;
+    cancelAnimationFrame(d.raf);
+    dragRef.current = null;
+    setDrag(null);
+    if (commit && d.to !== d.from) moveItem(d.from, d.to);
+  };
+  useEffect(() => () => dragRef.current && cancelAnimationFrame(dragRef.current.raf), []);
   const setTerm = (k, v) => setDoc((d) => ({ ...d, terms: { ...d.terms, [k]: v } }));
 
   const pickClient = (clientId) => {
@@ -119,24 +224,20 @@ export default function DocumentEditor() {
     }
     setSaving(true);
     try {
+      // drop empty section headers and the temporary row ids before saving
+      const payload = {
+        ...doc,
+        items: doc.items
+          .filter((it) => it.kind !== "header" || (it.description || "").trim())
+          .map(({ uid, ...rest }) => rest),
+      };
       let result;
       if (editing) {
-        result = (await api.put(`/documents/${id}`, doc)).data;
+        result = (await api.put(`/documents/${id}`, payload)).data;
       } else {
-        result = (await api.post("/documents", doc)).data;
+        result = (await api.post("/documents", payload)).data;
       }
       toast.success("Saved");
-      // Put a PDF copy straight into this client's folder (bill / challan / quotation sub-folder).
-      // The document itself is already saved, so a failure here only shows a warning.
-      try {
-        await saveDocumentToClientFolder(result, company);
-        toast.success(`Copy added to ${result.customer_name}'s ${result.doc_type} folder`);
-      } catch (folderErr) {
-        toast.error(
-          "Saved, but the copy could not be added to the client folder: " +
-            (formatApiError(folderErr.response?.data?.detail) || folderErr.message)
-        );
-      }
       if (thenView) navigate(`/view/${result.id}`);
       else navigate(isBill ? "/bills" : isChallan ? "/challans" : "/quotations");
     } catch (err) {
@@ -145,6 +246,10 @@ export default function DocumentEditor() {
       setSaving(false);
     }
   };
+
+  // serial numbers only count real items, never section headers
+  let serialCount = 0;
+  const rowNumbers = doc.items.map((it) => (it.kind === "header" ? null : (serialCount += 1)));
 
   const heading = isBill ? "Bill / Invoice" : isChallan ? "Delivery Challan" : "Quotation";
 
@@ -240,77 +345,149 @@ export default function DocumentEditor() {
 
         {/* Items */}
         <Section title="Line Items">
-          <div className="space-y-3">
-            {doc.items.map((it, i) => (
-              <div key={i} className="border border-slate-200 rounded-md p-3 bg-slate-50" data-testid={`item-row-${i}`}>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-bold text-slate-400">#{i + 1}</span>
-                  <button
-                    onClick={() => removeItem(i)}
-                    data-testid={`remove-item-${i}`}
-                    className="text-slate-400 hover:text-red-600 transition-colors"
+          <p className="text-xs text-slate-500 mb-3">
+            Drag the <DotsSixVertical size={12} weight="bold" className="inline -mt-0.5" /> handle up or down to reorder rows.
+            Use <b>+ Header</b> to add a section heading anywhere.
+          </p>
+          <div ref={listRef}>
+            <InsertBar index={0} onItem={() => insertRow("item", 0)} onHeader={() => insertRow("header", 0)} />
+            {doc.items.map((it, i) => {
+              const isHeader = it.kind === "header";
+              const last = i === doc.items.length - 1;
+              return (
+                <Fragment key={it.uid || i}>
+                  <div
+                    data-item-card
+                    data-testid={`item-row-${i}`}
+                    style={drag && drag.from === i ? { transform: `translateY(${drag.dy}px)`, transition: "none" } : undefined}
+                    className={`border rounded-md p-3 ${drag ? "" : "transition-colors"} ${
+                      isHeader ? "border-orange-200 bg-orange-50" : "border-slate-200 bg-slate-50"
+                    } ${drag && drag.from === i ? "relative z-20 shadow-xl ring-2 ring-orange-400 opacity-95" : ""} ${
+                      drag && drag.from !== i && drag.to !== drag.from && drag.to === i
+                        ? drag.to > drag.from
+                          ? "shadow-[0_4px_0_0_#f97316]"   // row will land just below this one
+                          : "shadow-[0_-4px_0_0_#f97316]"  // row will land just above this one
+                        : ""
+                    }`}
                   >
-                    <Trash size={15} weight="bold" />
-                  </button>
-                </div>
-                <div className="relative mb-2">
-                  <Textarea
-                    data-testid={`item-desc-${i}`}
-                    value={it.description}
-                    onChange={(e) => setItem(i, "description", e.target.value)}
-                    onFocus={() => setOpenSuggestFor(i)}
-                    onBlur={() => setTimeout(() => setOpenSuggestFor((cur) => (cur === i ? null : cur)), 150)}
-                    placeholder="Item description"
-                    className="border-slate-300 focus:ring-2 focus:ring-orange-500 min-h-[44px] text-sm"
-                  />
-                  {openSuggestFor === i && it.description && (() => {
-                    const q = it.description.trim().toLowerCase();
-                    const matches = catalog
-                      .filter((c) => c.description.toLowerCase().includes(q) && c.description.toLowerCase() !== q)
-                      .slice(0, 6);
-                    if (matches.length === 0) return null;
-                    return (
-                      <div className="absolute z-10 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-md shadow-lg max-h-48 overflow-auto">
-                        {matches.map((m, mi) => (
-                          <button
-                            key={mi}
-                            type="button"
-                            data-testid={`item-suggestion-${i}-${mi}`}
-                            onMouseDown={(e) => { e.preventDefault(); selectCatalogItem(i, m); }}
-                            className="w-full text-left px-3 py-2 text-sm hover:bg-orange-50 border-b border-slate-100 last:border-b-0 flex items-center justify-between gap-2"
-                          >
-                            <span className="truncate">{m.description}</span>
-                            <span className="text-xs text-slate-400 shrink-0">₹{m.rate}</span>
-                          </button>
-                        ))}
+                    <div className="flex items-center justify-between mb-2 gap-2">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          data-testid={`drag-handle-${i}`}
+                          title="Drag up or down to move"
+                          onPointerDown={(e) => startDrag(e, i)}
+                          onPointerMove={moveDrag}
+                          onPointerUp={() => endDrag(true)}
+                          onPointerCancel={() => endDrag(false)}
+                          style={{ touchAction: "none" }}
+                          className="cursor-grab active:cursor-grabbing text-slate-400 hover:text-slate-700 p-1.5 -m-1 select-none"
+                        >
+                          <DotsSixVertical size={20} weight="bold" />
+                        </span>
+                        {isHeader ? (
+                          <span className="text-xs font-bold uppercase tracking-wider text-orange-700 flex items-center gap-1">
+                            <TextT size={13} weight="bold" /> Section header
+                          </span>
+                        ) : (
+                          <span className="text-xs font-bold text-slate-400">#{rowNumbers[i]}</span>
+                        )}
                       </div>
-                    );
-                  })()}
-                </div>
-                {isChallan ? (
-                  <div className="grid grid-cols-2 gap-2">
-                    <MiniField label="Qty" type="number" value={it.qty} onChange={(v) => setItem(i, "qty", v)} testid={`item-qty-${i}`} />
-                    <MiniField label="Unit" value={it.unit} onChange={(v) => setItem(i, "unit", v)} testid={`item-unit-${i}`} />
+                      <div className="flex items-center shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => removeItem(i)}
+                          data-testid={`remove-item-${i}`}
+                          title="Delete row"
+                          className="p-1 rounded text-slate-400 hover:text-red-600 hover:bg-white transition-colors"
+                        >
+                          <Trash size={15} weight="bold" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {isHeader ? (
+                      <Input
+                        data-testid={`header-text-${i}`}
+                        value={it.description}
+                        onChange={(e) => setItem(i, "description", e.target.value)}
+                        placeholder="Heading text, e.g. Spares for Filling Machine"
+                        className="border-orange-300 bg-white font-semibold focus:ring-2 focus:ring-orange-500"
+                      />
+                    ) : (
+                      <>
+                        <div className="relative mb-2">
+                          <Textarea
+                            data-testid={`item-desc-${i}`}
+                            value={it.description}
+                            onChange={(e) => setItem(i, "description", e.target.value)}
+                            onFocus={() => setOpenSuggestFor(i)}
+                            onBlur={() => setTimeout(() => setOpenSuggestFor((cur) => (cur === i ? null : cur)), 150)}
+                            placeholder="Item description"
+                            className="border-slate-300 focus:ring-2 focus:ring-orange-500 min-h-[44px] text-sm"
+                          />
+                          {openSuggestFor === i && it.description && (() => {
+                            const q = it.description.trim().toLowerCase();
+                            const matches = catalog
+                              .filter((c) => c.description.toLowerCase().includes(q) && c.description.toLowerCase() !== q)
+                              .slice(0, 6);
+                            if (matches.length === 0) return null;
+                            return (
+                              <div className="absolute z-10 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-md shadow-lg max-h-48 overflow-auto">
+                                {matches.map((m, mi) => (
+                                  <button
+                                    key={mi}
+                                    type="button"
+                                    data-testid={`item-suggestion-${i}-${mi}`}
+                                    onMouseDown={(e) => { e.preventDefault(); selectCatalogItem(i, m); }}
+                                    className="w-full text-left px-3 py-2 text-sm hover:bg-orange-50 border-b border-slate-100 last:border-b-0 flex items-center justify-between gap-2"
+                                  >
+                                    <span className="truncate">{m.description}</span>
+                                    <span className="text-xs text-slate-400 shrink-0">₹{m.rate}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                        {isChallan ? (
+                          <div className="grid grid-cols-2 gap-2">
+                            <MiniField label="Qty" type="number" value={it.qty} onChange={(v) => setItem(i, "qty", v)} testid={`item-qty-${i}`} />
+                            <MiniField label="Unit" value={it.unit} onChange={(v) => setItem(i, "unit", v)} testid={`item-unit-${i}`} />
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-4 gap-2">
+                            <MiniField label="HSN Code" value={it.hsn} onChange={(v) => setItem(i, "hsn", v)} testid={`item-hsn-${i}`} />
+                            <MiniField label="Qty" type="number" value={it.qty} onChange={(v) => setItem(i, "qty", v)} testid={`item-qty-${i}`} />
+                            <MiniField label="Unit" value={it.unit} onChange={(v) => setItem(i, "unit", v)} testid={`item-unit-${i}`} />
+                            <MiniField label="Rate" type="number" value={it.rate} onChange={(v) => setItem(i, "rate", v)} testid={`item-rate-${i}`} />
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
-                ) : (
-                  <div className="grid grid-cols-4 gap-2">
-                    <MiniField label="HSN Code" value={it.hsn} onChange={(v) => setItem(i, "hsn", v)} testid={`item-hsn-${i}`} />
-                    <MiniField label="Qty" type="number" value={it.qty} onChange={(v) => setItem(i, "qty", v)} testid={`item-qty-${i}`} />
-                    <MiniField label="Unit" value={it.unit} onChange={(v) => setItem(i, "unit", v)} testid={`item-unit-${i}`} />
-                    <MiniField label="Rate" type="number" value={it.rate} onChange={(v) => setItem(i, "rate", v)} testid={`item-rate-${i}`} />
-                  </div>
-                )}
-              </div>
-            ))}
+                  <InsertBar index={i + 1} onItem={() => insertRow("item", i + 1)} onHeader={() => insertRow("header", i + 1)} />
+                </Fragment>
+              );
+            })}
           </div>
-          <Button
-            onClick={addItem}
-            data-testid="add-item-button"
-            variant="outline"
-            className="mt-3 w-full border-dashed border-slate-300 text-slate-600 hover:bg-slate-50 rounded-md"
-          >
-            <Plus size={16} weight="bold" className="mr-2" /> Add Item
-          </Button>
+          <div className="grid grid-cols-2 gap-2 mt-2">
+            <Button
+              onClick={() => insertRow("item")}
+              data-testid="add-item-button"
+              variant="outline"
+              className="border-dashed border-slate-300 text-slate-600 hover:bg-slate-50 rounded-md"
+            >
+              <Plus size={16} weight="bold" className="mr-2" /> Add Item
+            </Button>
+            <Button
+              onClick={() => insertRow("header")}
+              data-testid="add-header-button"
+              variant="outline"
+              className="border-dashed border-orange-300 text-orange-700 hover:bg-orange-50 rounded-md"
+            >
+              <TextT size={16} weight="bold" className="mr-2" /> Add Header
+            </Button>
+          </div>
         </Section>
 
         {/* Tax + Discount – hidden for challan; quotation only gets Discount (GST is stated in its own Terms section) */}
@@ -378,6 +555,17 @@ export default function DocumentEditor() {
           <DocumentPreview doc={doc} company={company} />
         </div>
       </div>
+    </div>
+  );
+}
+
+function InsertBar({ index, onItem, onHeader }) {
+  return (
+    <div className="flex items-center gap-2 py-1 group" data-testid={`insert-bar-${index}`}>
+      <div className="flex-1 border-t border-dashed border-slate-200 group-hover:border-orange-300" />
+      <button type="button" onClick={onItem} data-testid={`insert-item-${index}`} className="text-[11px] font-semibold text-slate-400 hover:text-orange-700">+ Item</button>
+      <button type="button" onClick={onHeader} data-testid={`insert-header-${index}`} className="text-[11px] font-semibold text-slate-400 hover:text-orange-700">+ Header</button>
+      <div className="flex-1 border-t border-dashed border-slate-200 group-hover:border-orange-300" />
     </div>
   );
 }

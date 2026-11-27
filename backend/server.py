@@ -16,7 +16,13 @@ from bson import ObjectId
 import bcrypt
 import jwt
 import logging
+import asyncio
+import imaplib
 import re
+import email as email_lib
+from email import policy as email_policy
+from email.utils import parseaddr, parsedate_to_datetime
+from html import unescape
 from urllib.parse import quote
 
 # ---------------------------------------------------------------------------
@@ -33,7 +39,7 @@ FILES_COLL = db["client_files.files"]
 MAX_FILE_BYTES = 15 * 1024 * 1024  # 15 MB per file
 # Sub-folders inside every client folder. Files saved before sub-folders existed
 # have no category and show up under "other".
-FILE_CATEGORIES = ("bill", "challan", "quotation")
+FILE_CATEGORIES = ("bill", "challan", "quotation", "purchase_order")
 
 JWT_ALGORITHM = "HS256"
 
@@ -86,6 +92,9 @@ class LoginInput(BaseModel):
 
 
 class LineItem(BaseModel):
+    # "item" = a normal priced line. "header" = a section heading row (only its description
+    # is used; it has no quantity, rate or amount and is not numbered).
+    kind: Literal["item", "header"] = "item"
     description: str = ""
     hsn: str = ""
     qty: float = 1
@@ -229,6 +238,8 @@ async def get_current_user(request: Request) -> dict:
 def compute_totals(doc: dict) -> dict:
     gross = 0.0
     for it in doc.get("items", []):
+        if it.get("kind") == "header":
+            continue
         gross += float(it.get("qty", 0) or 0) * float(it.get("rate", 0) or 0)
     gross = round(gross, 2)
     disc_pct = float(doc.get("discount_percent", 0) or 0)
@@ -256,10 +267,41 @@ def compute_totals(doc: dict) -> dict:
     }
 
 
+def payment_summary(doc: dict, grand_total: float) -> dict:
+    """Paid / balance / status for bills. Other document types have no payment info."""
+    if doc.get("doc_type") != "bill":
+        return {}
+    paid = round(sum(float(p.get("amount", 0) or 0) for p in doc.get("payments", [])), 2)
+    balance = round(max(grand_total - paid, 0), 2)
+    if grand_total > 0 and balance <= 0.01:
+        status = "paid"
+    elif paid > 0:
+        status = "partial"
+    else:
+        status = "unpaid"
+    overdue = False
+    due = doc.get("due_date") or ""
+    if due and status != "paid":
+        try:
+            overdue = datetime.fromisoformat(due).date() < datetime.now().date()
+        except ValueError:
+            overdue = False
+    return {
+        "amount_paid": paid,
+        "balance": balance,
+        "payment_status": status,
+        "overdue": overdue,
+        "due_date": due,
+        "payments": doc.get("payments", []),
+    }
+
+
 def serialize_doc(doc: dict) -> dict:
     doc = dict(doc)
     doc["id"] = str(doc.pop("_id"))
-    doc.update(compute_totals(doc))
+    totals = compute_totals(doc)
+    doc.update(totals)
+    doc.update(payment_summary(doc, totals["grand_total"]))
     return doc
 
 
@@ -383,6 +425,8 @@ async def delete_client(client_id: str, user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 async def remember_items(items: list):
     for it in items or []:
+        if it.get("kind") == "header":
+            continue  # section headings are not products
         desc = (it.get("description") or "").strip()
         if not desc:
             continue
@@ -439,6 +483,8 @@ async def stats(user: dict = Depends(get_current_user)):
     quotations = []
     bills = []
     challan_count = 0
+    outstanding = received = 0.0
+    unpaid_count = overdue_count = 0
     async for d in db.documents.find():
         t = compute_totals(d)
         if d.get("doc_type") == "quotation":
@@ -447,20 +493,28 @@ async def stats(user: dict = Depends(get_current_user)):
             challan_count += 1
         else:
             bills.append(t["grand_total"])
+            ps = payment_summary(d, t["grand_total"])
+            outstanding += ps["balance"]
+            received += ps["amount_paid"]
+            if ps["payment_status"] != "paid":
+                unpaid_count += 1
+            if ps["overdue"]:
+                overdue_count += 1
+    pending_orders = await db.orders.count_documents({"status": "pending"})
+    open_orders = await db.orders.count_documents({"status": {"$in": ["pending", "in_progress"]}})
     return {
+        "outstanding": round(outstanding, 2),
+        "received": round(received, 2),
+        "unpaid_count": unpaid_count,
+        "overdue_count": overdue_count,
+        "pending_orders": pending_orders,
+        "open_orders": open_orders,
         "quotation_count": len(quotations),
         "bill_count": len(bills),
         "challan_count": challan_count,
         "quotation_value": round(sum(quotations), 2),
         "bill_value": round(sum(bills), 2),
     }
-
-
-@api_router.get("/documents/filed-ids")
-async def filed_document_ids(user: dict = Depends(get_current_user)):
-    """Ids of documents that already have a PDF copy in a client folder."""
-    ids = await FILES_COLL.distinct("metadata.document_id")
-    return [i for i in ids if i]
 
 
 @api_router.get("/documents/{doc_id}")
@@ -526,6 +580,8 @@ async def convert_to_bill(doc_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Document not found")
     new = dict(d)
     new.pop("_id", None)
+    new.pop("payments", None)
+    new.pop("due_date", None)
     new["doc_type"] = "bill"
     new["number"] = await next_number("bill")
     new["date"] = datetime.now().strftime("%d/%m/%Y")
@@ -565,13 +621,18 @@ async def convert_to_challan(doc_id: str, user: dict = Depends(get_current_user)
         "customer_gstin": d.get("customer_gstin", ""),
         "customer_attention": d.get("customer_attention", ""),
         "items": [
-            {
-                "description": it.get("description", ""),
-                "hsn": "",
-                "qty": it.get("qty", 0),
-                "unit": it.get("unit", "Nos"),
-                "rate": 0,
-            }
+            (
+                {"kind": "header", "description": it.get("description", ""), "hsn": "", "qty": 0, "unit": "", "rate": 0}
+                if it.get("kind") == "header"
+                else {
+                    "kind": "item",
+                    "description": it.get("description", ""),
+                    "hsn": "",
+                    "qty": it.get("qty", 0),
+                    "unit": it.get("unit", "Nos"),
+                    "rate": 0,
+                }
+            )
             for it in d.get("items", [])
         ],
         "gst_type": "none",
@@ -588,49 +649,6 @@ async def convert_to_challan(doc_id: str, user: dict = Depends(get_current_user)
     return serialize_doc(created)
 
 
-@api_router.post("/documents/{doc_id}/file")
-async def save_document_file(
-    doc_id: str,
-    file: UploadFile = File(...),
-    user: dict = Depends(get_current_user),
-):
-    """Store the PDF of a saved document in its client's folder (replacing the
-    previous PDF of the same document, if any)."""
-    d = await db.documents.find_one({"_id": oid(doc_id)})
-    if not d:
-        raise HTTPException(status_code=404, detail="Document not found")
-    category = d.get("doc_type")
-    if category not in FILE_CATEGORIES:
-        raise HTTPException(status_code=400, detail="Unsupported document type")
-
-    data = await file.read(MAX_FILE_BYTES + 1)
-    if not data:
-        raise HTTPException(status_code=400, detail="Empty file")
-    if len(data) > MAX_FILE_BYTES:
-        raise HTTPException(status_code=400, detail="PDF is larger than the 15 MB limit")
-
-    client_id = await resolve_client_for_document(d)
-
-    # Drop the earlier copy of this same document (also covers a changed customer name)
-    async for old in FILES_COLL.find({"metadata.document_id": doc_id}):
-        await fs_bucket.delete(old["_id"])
-
-    file_id = await fs_bucket.upload_from_stream(
-        document_pdf_name(d),
-        data,
-        metadata={
-            "client_id": client_id,
-            "category": category,
-            "content_type": "application/pdf",
-            "uploaded_by": user.get("email", ""),
-            "document_id": doc_id,
-        },
-    )
-    await db.documents.update_one({"_id": d["_id"]}, {"$set": {"client_id": client_id}})
-    f = await FILES_COLL.find_one({"_id": file_id})
-    return {"file": serialize_file(f), "client_id": client_id}
-
-
 @api_router.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str, user: dict = Depends(get_current_user)):
     res = await db.documents.delete_one({"_id": oid(doc_id)})
@@ -639,53 +657,75 @@ async def delete_document(doc_id: str, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
-
 # ---------------------------------------------------------------------------
-# Saved document -> client folder
-# Every saved bill / quotation / challan gets a PDF copy placed in the matching
-# client's folder (sub-folder = bill / quotation / challan). Saving the same
-# document again replaces its earlier PDF instead of piling up duplicates.
+# Payments (bills only)
 # ---------------------------------------------------------------------------
-TYPE_LABEL = {"bill": "Bill", "quotation": "Quotation", "challan": "Challan"}
+class PaymentIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    date: str = ""          # ISO yyyy-mm-dd
+    amount: float
+    mode: str = "bank"      # cash / bank / upi / cheque / tds / other
+    reference: str = ""
+    note: str = ""
 
 
-def clean_for_filename(s: str) -> str:
-    s = re.sub(r'[\\/:*?"<>|]+', "-", str(s or ""))
-    return re.sub(r"\s+", " ", s).strip()
+class PaymentInfoIn(BaseModel):
+    due_date: str = ""      # ISO yyyy-mm-dd or empty
 
 
-def document_pdf_name(d: dict) -> str:
-    """Same pattern as the frontend: <Client>_<Type>_<Number>.pdf"""
-    parts = [
-        clean_for_filename(d.get("customer_name")) or "Client",
-        TYPE_LABEL.get(d.get("doc_type"), "Document"),
-        clean_for_filename(d.get("number")),
-    ]
-    return "_".join(p for p in parts if p) + ".pdf"
+async def _get_bill(doc_id: str) -> dict:
+    d = await db.documents.find_one({"_id": oid(doc_id)})
+    if not d:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if d.get("doc_type") != "bill":
+        raise HTTPException(status_code=400, detail="Payments can only be recorded on bills")
+    return d
 
 
-async def resolve_client_for_document(d: dict) -> str:
-    """Find the client whose folder this document belongs to (matched by customer name,
-    ignoring case/extra spaces). If there is no such client yet, create one from the
-    details on the document so the folder exists."""
-    name = re.sub(r"\s+", " ", (d.get("customer_name") or "")).strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Document has no customer name")
-    existing = await db.clients.find_one(
-        {"name": {"$regex": f"^\\s*{re.escape(name)}\\s*$", "$options": "i"}}
-    )
-    if existing:
-        return str(existing["_id"])
-    res = await db.clients.insert_one({
-        "name": name,
-        "address": d.get("customer_address", "") or "",
-        "gstin": d.get("customer_gstin", "") or "",
-        "attention": d.get("customer_attention", "") or "",
-        "phone": "",
-        "email": "",
-        "created_at": now_utc().isoformat(),
-    })
-    return str(res.inserted_id)
+@api_router.post("/documents/{doc_id}/payments")
+async def add_payment(doc_id: str, payload: PaymentIn, user: dict = Depends(get_current_user)):
+    d = await _get_bill(doc_id)
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be more than zero")
+    total = compute_totals(d)["grand_total"]
+    ps = payment_summary(d, total)
+    if payload.amount > ps["balance"] + 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Amount is more than the balance due (\u20b9{ps['balance']:.2f})",
+        )
+    entry = {
+        "id": str(ObjectId()),
+        "date": payload.date or datetime.now().strftime("%Y-%m-%d"),
+        "amount": round(payload.amount, 2),
+        "mode": payload.mode,
+        "reference": payload.reference.strip(),
+        "note": payload.note.strip(),
+        "recorded_at": now_utc().isoformat(),
+    }
+    await db.documents.update_one({"_id": d["_id"]}, {"$push": {"payments": entry}})
+    return serialize_doc(await db.documents.find_one({"_id": d["_id"]}))
+
+
+@api_router.delete("/documents/{doc_id}/payments/{payment_id}")
+async def delete_payment(doc_id: str, payment_id: str, user: dict = Depends(get_current_user)):
+    d = await _get_bill(doc_id)
+    await db.documents.update_one({"_id": d["_id"]}, {"$pull": {"payments": {"id": payment_id}}})
+    return serialize_doc(await db.documents.find_one({"_id": d["_id"]}))
+
+
+@api_router.put("/documents/{doc_id}/payment-info")
+async def set_payment_info(doc_id: str, payload: PaymentInfoIn, user: dict = Depends(get_current_user)):
+    d = await _get_bill(doc_id)
+    due = payload.due_date.strip()
+    if due:
+        try:
+            datetime.fromisoformat(due)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Due date must look like 2026-12-31")
+    await db.documents.update_one({"_id": d["_id"]}, {"$set": {"due_date": due}})
+    return serialize_doc(await db.documents.find_one({"_id": d["_id"]}))
+
 
 # ---------------------------------------------------------------------------
 # Client files — one "folder" per client
@@ -820,6 +860,399 @@ async def delete_file(file_id: str, user: dict = Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
+# Purchase orders
+# ---------------------------------------------------------------------------
+ORDER_STATUSES = ("pending", "in_progress", "delivered", "completed", "cancelled")
+
+
+class OrderIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    po_number: str = ""
+    po_date: str = ""          # ISO yyyy-mm-dd
+    customer_name: str = ""
+    client_id: str = ""
+    subject: str = ""
+    order_value: float = 0
+    expected_date: str = ""    # promised / expected delivery date, ISO
+    status: Literal["pending", "in_progress", "delivered", "completed", "cancelled"] = "pending"
+    notes: str = ""
+
+
+async def serialize_orders(rows: List[dict]) -> List[dict]:
+    """Adds attachments and the bills/challans/quotations that carry the same PO number."""
+    ids = [str(r["_id"]) for r in rows]
+    po_numbers = [r["po_number"] for r in rows if r.get("po_number")]
+    attachments, linked = {}, {}
+    if ids:
+        async for f in FILES_COLL.find({"metadata.order_id": {"$in": ids}}):
+            attachments.setdefault(f["metadata"]["order_id"], []).append(serialize_file(f))
+    if po_numbers:
+        async for d in db.documents.find({"po_number": {"$in": po_numbers}}):
+            t = compute_totals(d)
+            ps = payment_summary(d, t["grand_total"])
+            linked.setdefault(d["po_number"], []).append({
+                "id": str(d["_id"]),
+                "doc_type": d.get("doc_type"),
+                "number": d.get("number", ""),
+                "grand_total": t["grand_total"],
+                "payment_status": ps.get("payment_status"),
+            })
+    today = datetime.now().date()
+    out = []
+    for r in rows:
+        o = dict(r)
+        o["id"] = str(o.pop("_id"))
+        o["attachments"] = attachments.get(o["id"], [])
+        o["linked_documents"] = linked.get(o.get("po_number", ""), [])
+        overdue = False
+        if o.get("expected_date") and o.get("status") in ("pending", "in_progress"):
+            try:
+                overdue = datetime.fromisoformat(o["expected_date"]).date() < today
+            except ValueError:
+                pass
+        o["overdue"] = overdue
+        out.append(o)
+    return out
+
+
+@api_router.get("/orders")
+async def list_orders(status: Optional[str] = None, user: dict = Depends(get_current_user)):
+    query = {"status": status} if status else {}
+    rows = [r async for r in db.orders.find(query).sort("created_at", -1)]
+    return await serialize_orders(rows)
+
+
+@api_router.post("/orders")
+async def create_order(payload: OrderIn, user: dict = Depends(get_current_user)):
+    data = payload.model_dump()
+    data.update({"source": "manual", "created_at": now_utc().isoformat(), "updated_at": now_utc().isoformat()})
+    res = await db.orders.insert_one(data)
+    return (await serialize_orders([await db.orders.find_one({"_id": res.inserted_id})]))[0]
+
+
+@api_router.put("/orders/{order_id}")
+async def update_order(order_id: str, payload: OrderIn, user: dict = Depends(get_current_user)):
+    if not await db.orders.find_one({"_id": oid(order_id)}):
+        raise HTTPException(status_code=404, detail="Order not found")
+    data = payload.model_dump()
+    data["updated_at"] = now_utc().isoformat()
+    await db.orders.update_one({"_id": oid(order_id)}, {"$set": data})
+    return (await serialize_orders([await db.orders.find_one({"_id": oid(order_id)})]))[0]
+
+
+@api_router.delete("/orders/{order_id}")
+async def delete_order(order_id: str, user: dict = Depends(get_current_user)):
+    o = await db.orders.find_one({"_id": oid(order_id)})
+    if not o:
+        raise HTTPException(status_code=404, detail="Order not found")
+    # Attachments that belong to a client folder stay there; loose ones are removed
+    async for f in FILES_COLL.find({"metadata.order_id": order_id}):
+        if f["metadata"].get("client_id"):
+            await FILES_COLL.update_one({"_id": f["_id"]}, {"$unset": {"metadata.order_id": ""}})
+        else:
+            await fs_bucket.delete(f["_id"])
+    await db.orders.delete_one({"_id": oid(order_id)})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Yahoo Mail (IMAP, read-only) -> purchase-order inbox
+# ---------------------------------------------------------------------------
+# Needs these environment variables (never stored in the database):
+#   MAIL_USER           your Yahoo address
+#   MAIL_APP_PASSWORD   a Yahoo *app password* (not your normal password)
+# Optional: MAIL_IMAP_HOST (imap.mail.yahoo.com), MAIL_FOLDER (INBOX),
+#           MAIL_KEYWORDS, MAIL_POLL_MINUTES (0 = only sync when you click the button)
+MAIL_ATTACH_MAX_BYTES = 5 * 1024 * 1024
+MAIL_ATTACH_TYPES = ("application/pdf", "image/", "application/vnd.", "application/msword", "text/csv")
+FREE_MAIL_DOMAINS = {"gmail.com", "yahoo.com", "yahoo.co.in", "yahoo.in", "outlook.com", "hotmail.com", "rediffmail.com", "live.com", "icloud.com"}
+mail_lock = asyncio.Lock()
+
+
+def mail_settings() -> dict:
+    return {
+        "user": os.environ.get("MAIL_USER", "").strip(),
+        "password": os.environ.get("MAIL_APP_PASSWORD", "").strip(),
+        "host": os.environ.get("MAIL_IMAP_HOST", "imap.mail.yahoo.com").strip(),
+        "folder": os.environ.get("MAIL_FOLDER", "INBOX").strip(),
+        "keywords": [k.strip().lower() for k in os.environ.get(
+            "MAIL_KEYWORDS", "purchase order,p.o.,po no,po #,po-,order").split(",") if k.strip()],
+    }
+
+
+PO_PATTERNS = [
+    re.compile(r"(?:purchase\s*order|p\.?\s?o\.?)\s*(?:no\.?|number|num|#)?\s*[:#\-]?\s*([A-Z0-9][A-Z0-9\-/_.]{2,24})", re.I),
+]
+
+
+def guess_po_number(*texts: str) -> str:
+    """Best-effort guess of the PO number. The user always confirms it before saving."""
+    for text in texts:
+        for pat in PO_PATTERNS:
+            for m in pat.finditer(text or ""):
+                cand = m.group(1).strip(".-/_")
+                # needs at least one digit, otherwise it is probably a normal word
+                if re.search(r"\d", cand):
+                    return cand
+    return ""
+
+
+def html_to_text(html: str) -> str:
+    html = re.sub(r"(?is)<(script|style).*?</\1>", " ", html)
+    html = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", html)
+    text = unescape(re.sub(r"<[^>]+>", " ", html))
+    return re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n", text)).strip()
+
+
+def _fetch_mail(days: int, known_ids: set, limit: int = 150) -> List[dict]:
+    """Blocking IMAP work (run in a thread). Opens the mailbox read-only and uses
+    BODY.PEEK, so emails are NOT marked as read in Yahoo."""
+    cfg = mail_settings()
+    box = imaplib.IMAP4_SSL(cfg["host"], 993, timeout=40)
+    results = []
+    try:
+        box.login(cfg["user"], cfg["password"])
+        box.select(cfg["folder"], readonly=True)
+        since = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
+        typ, data = box.uid("search", None, "SINCE", since)
+        uids = data[0].split()[-limit:] if data and data[0] else []
+        for uid in reversed(uids):
+            typ, hdr = box.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            head = email_lib.message_from_bytes(hdr[0][1], policy=email_policy.default) if hdr and hdr[0] else None
+            message_id = (head["Message-ID"] if head else "") or f"uid-{cfg['folder']}-{uid.decode()}"
+            message_id = str(message_id).strip()
+            if message_id in known_ids:
+                continue
+            typ, raw = box.uid("fetch", uid, "(BODY.PEEK[])")
+            if not raw or not raw[0]:
+                continue
+            msg = email_lib.message_from_bytes(raw[0][1], policy=email_policy.default)
+            body_part = msg.get_body(preferencelist=("plain", "html"))
+            body = ""
+            if body_part is not None:
+                try:
+                    body = body_part.get_content()
+                except Exception:
+                    body = ""
+                if body_part.get_content_type() == "text/html":
+                    body = html_to_text(body)
+            name, addr = parseaddr(str(msg.get("From", "")))
+            try:
+                when = parsedate_to_datetime(str(msg.get("Date"))).astimezone(timezone.utc).isoformat()
+            except Exception:
+                when = now_utc().isoformat()
+            attachments = []
+            for part in msg.iter_attachments():
+                ctype = part.get_content_type()
+                payload = part.get_payload(decode=True) or b""
+                fname = part.get_filename() or "attachment"
+                if not payload or len(payload) > MAIL_ATTACH_MAX_BYTES:
+                    continue
+                if not any(ctype.startswith(t) for t in MAIL_ATTACH_TYPES):
+                    continue
+                if ctype.startswith("image/") and len(payload) < 30 * 1024:
+                    continue  # signature logos and tracking pixels
+                attachments.append((os.path.basename(fname), ctype, payload))
+                if len(attachments) >= 5:
+                    break
+            results.append({
+                "message_id": message_id,
+                "subject": str(msg.get("Subject", "")).strip(),
+                "from_name": name,
+                "from_email": addr.lower(),
+                "received_at": when,
+                "body": body.strip()[:4000],
+                "attachments": attachments,
+            })
+    finally:
+        try:
+            box.logout()
+        except Exception:
+            pass
+    return results
+
+
+async def match_client(addr: str) -> Optional[dict]:
+    """Find a client by the sender's email address, then by company domain."""
+    if not addr:
+        return None
+    domain = addr.split("@")[-1]
+    by_domain = None
+    async for c in db.clients.find({"email": {"$ne": ""}}):
+        emails = [e.strip().lower() for e in re.split(r"[,;/\s]+", c.get("email", "")) if "@" in e]
+        if addr in emails:
+            return c
+        if domain not in FREE_MAIL_DOMAINS and any(e.split("@")[-1] == domain for e in emails):
+            by_domain = by_domain or c
+    return by_domain
+
+
+async def sync_mail(days: int = 30) -> dict:
+    cfg = mail_settings()
+    if not (cfg["user"] and cfg["password"]):
+        raise HTTPException(status_code=400, detail="Mail is not set up on the server")
+    if mail_lock.locked():
+        raise HTTPException(status_code=409, detail="A mail sync is already running")
+    async with mail_lock:
+        counts = {"checked": 0, "added": 0}
+        error = ""
+        try:
+            known = {m["message_id"] async for m in db.mail_inbox.find({}, {"message_id": 1})}
+            fetched = await asyncio.to_thread(_fetch_mail, max(1, min(days, 180)), known)
+            counts["checked"] = len(fetched)
+            for m in fetched:
+                haystack = f"{m['subject']}\n{m['body'][:2000]}\n" + " ".join(a[0] for a in m["attachments"])
+                haystack = haystack.lower()
+                client = await match_client(m["from_email"])
+                relevant = client is not None or any(k in haystack for k in cfg["keywords"])
+                doc = {
+                    "message_id": m["message_id"],
+                    "status": "new" if relevant else "filtered",
+                    "subject": m["subject"],
+                    "from_name": m["from_name"],
+                    "from_email": m["from_email"],
+                    "received_at": m["received_at"],
+                    "synced_at": now_utc().isoformat(),
+                }
+                if relevant:
+                    doc.update({
+                        "body": m["body"],
+                        "client_id": str(client["_id"]) if client else "",
+                        "client_name": client["name"] if client else "",
+                        "suggested_po": guess_po_number(m["subject"], m["body"][:1500]),
+                    })
+                try:
+                    res = await db.mail_inbox.insert_one(doc)
+                except Exception:
+                    continue  # duplicate message_id (unique index) - already known
+                if relevant:
+                    counts["added"] += 1
+                    for fname, ctype, payload in m["attachments"]:
+                        await fs_bucket.upload_from_stream(fname, payload, metadata={
+                            "mail_id": str(res.inserted_id),
+                            "client_id": doc["client_id"],
+                            "category": "purchase_order",
+                            "content_type": ctype,
+                            "uploaded_by": "mail-sync",
+                        })
+        except HTTPException:
+            raise
+        except imaplib.IMAP4.error as e:
+            error = ("Yahoo refused the login. Use a Yahoo app password (not your normal password) "
+                     "and make sure MAIL_USER is your full Yahoo address.")
+            logger.warning("IMAP login/protocol error: %s", type(e).__name__)
+        except Exception as e:
+            error = "Could not reach the mailbox. Please try again in a moment."
+            logger.warning("Mail sync failed: %s", type(e).__name__)
+        state = {"last_sync": now_utc().isoformat(), "last_error": error, "last_counts": counts}
+        await db.mail_state.update_one({"_id": "state"}, {"$set": state}, upsert=True)
+        return {**state, "ok": not error}
+
+
+async def mail_poll_loop(minutes: int):
+    while True:
+        await asyncio.sleep(minutes * 60)
+        try:
+            await sync_mail(30)
+        except Exception as e:  # keep the loop alive
+            logger.warning("Scheduled mail sync skipped: %s", type(e).__name__)
+
+
+@api_router.get("/mail/status")
+async def mail_status(user: dict = Depends(get_current_user)):
+    cfg = mail_settings()
+    state = await db.mail_state.find_one({"_id": "state"}) or {}
+    user_mask = ""
+    if cfg["user"]:
+        name, _, domain = cfg["user"].partition("@")
+        user_mask = f"{name[:2]}***@{domain}"
+    return {
+        "configured": bool(cfg["user"] and cfg["password"]),
+        "address": user_mask,
+        "host": cfg["host"],
+        "last_sync": state.get("last_sync", ""),
+        "last_error": state.get("last_error", ""),
+        "last_counts": state.get("last_counts", {}),
+        "auto_sync_minutes": int(os.environ.get("MAIL_POLL_MINUTES", "0") or 0),
+    }
+
+
+@api_router.post("/mail/sync")
+async def mail_sync(days: int = 30, user: dict = Depends(get_current_user)):
+    return await sync_mail(days)
+
+
+def serialize_mail(m: dict, files: List[dict]) -> dict:
+    return {
+        "id": str(m["_id"]),
+        "status": m.get("status", "new"),
+        "subject": m.get("subject", ""),
+        "from_name": m.get("from_name", ""),
+        "from_email": m.get("from_email", ""),
+        "received_at": m.get("received_at", ""),
+        "body": m.get("body", ""),
+        "client_id": m.get("client_id", ""),
+        "client_name": m.get("client_name", ""),
+        "suggested_po": m.get("suggested_po", ""),
+        "order_id": m.get("order_id", ""),
+        "attachments": files,
+    }
+
+
+@api_router.get("/mail/messages")
+async def list_mail(status: str = "new", user: dict = Depends(get_current_user)):
+    if status not in ("new", "converted", "ignored"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    rows = [m async for m in db.mail_inbox.find({"status": status}).sort("received_at", -1).limit(200)]
+    ids = [str(m["_id"]) for m in rows]
+    files = {}
+    if ids:
+        async for f in FILES_COLL.find({"metadata.mail_id": {"$in": ids}}):
+            files.setdefault(f["metadata"]["mail_id"], []).append(serialize_file(f))
+    return [serialize_mail(m, files.get(str(m["_id"]), [])) for m in rows]
+
+
+@api_router.post("/mail/messages/{mail_id}/ignore")
+async def ignore_mail(mail_id: str, user: dict = Depends(get_current_user)):
+    m = await db.mail_inbox.find_one({"_id": oid(mail_id)})
+    if not m:
+        raise HTTPException(status_code=404, detail="Email not found")
+    # Free the storage used by its attachments
+    async for f in FILES_COLL.find({"metadata.mail_id": mail_id}):
+        await fs_bucket.delete(f["_id"])
+    await db.mail_inbox.update_one({"_id": m["_id"]}, {"$set": {"status": "ignored"}})
+    return {"ok": True}
+
+
+@api_router.post("/mail/messages/{mail_id}/create-order")
+async def mail_to_order(mail_id: str, payload: OrderIn, user: dict = Depends(get_current_user)):
+    m = await db.mail_inbox.find_one({"_id": oid(mail_id)})
+    if not m:
+        raise HTTPException(status_code=404, detail="Email not found")
+    if m.get("status") == "converted":
+        raise HTTPException(status_code=400, detail="An order was already created from this email")
+    data = payload.model_dump()
+    if not data["po_date"]:
+        data["po_date"] = (m.get("received_at") or "")[:10]
+    data.update({
+        "source": "email",
+        "mail_id": mail_id,
+        "mail_subject": m.get("subject", ""),
+        "mail_from": m.get("from_email", ""),
+        "created_at": now_utc().isoformat(),
+        "updated_at": now_utc().isoformat(),
+    })
+    res = await db.orders.insert_one(data)
+    order_id = str(res.inserted_id)
+    set_fields = {"metadata.order_id": order_id}
+    if data["client_id"]:
+        set_fields["metadata.client_id"] = data["client_id"]  # shows up in the client's folder too
+    await FILES_COLL.update_many({"metadata.mail_id": mail_id}, {"$set": set_fields})
+    await db.mail_inbox.update_one({"_id": m["_id"]}, {"$set": {"status": "converted", "order_id": order_id}})
+    return (await serialize_orders([await db.orders.find_one({"_id": res.inserted_id})]))[0]
+
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
@@ -827,7 +1260,13 @@ async def startup():
     await db.users.create_index("email", unique=True)
     await db.item_catalog.create_index("key", unique=True)
     await FILES_COLL.create_index("metadata.client_id")
-    await FILES_COLL.create_index("metadata.document_id")
+    await FILES_COLL.create_index("metadata.order_id", sparse=True)
+    await FILES_COLL.create_index("metadata.mail_id", sparse=True)
+    await db.mail_inbox.create_index("message_id", unique=True)
+    await db.orders.create_index("status")
+    poll = int(os.environ.get("MAIL_POLL_MINUTES", "0") or 0)
+    if poll > 0 and mail_settings()["user"]:
+        app.state.mail_task = asyncio.create_task(mail_poll_loop(poll))
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})
@@ -849,6 +1288,9 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    task = getattr(app.state, "mail_task", None)
+    if task:
+        task.cancel()
     client.close()
 
 

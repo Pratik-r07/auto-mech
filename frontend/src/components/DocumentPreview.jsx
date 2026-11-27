@@ -5,7 +5,7 @@ const money = (n) =>
 
 function computeTotals(doc) {
   const gross = (doc.items || []).reduce(
-    (s, it) => s + Number(it.qty || 0) * Number(it.rate || 0),
+    (s, it) => (it.kind === "header" ? s : s + Number(it.qty || 0) * Number(it.rate || 0)),
     0
   );
   const discPct = Number(doc.discount_percent || 0);
@@ -42,9 +42,12 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
   const rate = Number(doc.gst_rate || 0);
 
   const items = doc.items || [];
+  // Section headers are not numbered: serial numbers only count real items
+  let serial = 0;
+  const numbered = items.map((it) => (it.kind === "header" ? { ...it, serial: 0 } : { ...it, serial: ++serial }));
   // Pad to at least 8 rows for consistent height
   const minRows = 10;
-  const padded = [...items, ...Array.from({ length: Math.max(0, minRows - items.length) }, () => null)];
+  const padded = [...numbered, ...Array.from({ length: Math.max(0, minRows - numbered.length) }, () => null)];
 
   return (
     <div
@@ -189,12 +192,22 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
         </thead>
         <tbody>
           {padded.map((it, i) => {
+            if (it && it.kind === "header") {
+              return (
+                <tr key={i} className="align-top">
+                  <td className="border-r border-slate-900 px-1 h-[28px]"></td>
+                  <td colSpan={isChallan ? 2 : 5} className="px-2 text-[14.5px] font-bold underline underline-offset-2 whitespace-pre-line">
+                    {it.description}
+                  </td>
+                </tr>
+              );
+            }
             const amt = it ? Number(it.qty || 0) * Number(it.rate || 0) : null;
             const parts = amt !== null ? split(amt) : null;
             return (
               <tr key={i} className="align-top">
                 <td className="border-r border-slate-900 px-1 text-center h-[28px]">
-                  {it ? String(i + 1).padStart(2, "0") : ""}
+                  {it ? String(it.serial).padStart(2, "0") : ""}
                 </td>
                 <td className="border-r border-slate-900 px-2 text-[14.5px]">
                   {it ? it.description : ""}
@@ -324,7 +337,7 @@ export default function DocumentPreview({ doc, company, showHeader = true }) {
           <div className="grid grid-cols-2 min-h-[130px]">
             <div className="border-r border-slate-900 p-3 flex flex-col justify-end">
               <div className="text-[12px] font-semibold">
-                Total Qty : {items.reduce((s, it) => s + Number(it.qty || 0), 0)}
+                Total Qty : {items.reduce((s, it) => (it.kind === "header" ? s : s + Number(it.qty || 0)), 0)}
               </div>
               <div className="mt-8 border-t border-slate-500 pt-1 text-[13px] italic">
                 Receiver&apos;s Signature
@@ -396,11 +409,24 @@ function QuotationBody({ doc, company, t }) {
           </tr>
         </thead>
         <tbody>
-          {items.map((it, i) => {
-            const amt = Number(it.qty || 0) * Number(it.rate || 0);
-            return (
+          {(() => {
+            let serial = 0;
+            return items.map((it, i) => {
+              if (it.kind === "header") {
+                return (
+                  <tr key={i}>
+                    <td className="border border-slate-900 px-1"></td>
+                    <td colSpan={4} className="border border-slate-900 px-2 text-[14.5px] font-bold underline underline-offset-2 whitespace-pre-line">
+                      {it.description}
+                    </td>
+                  </tr>
+                );
+              }
+              serial += 1;
+              const amt = Number(it.qty || 0) * Number(it.rate || 0);
+              return (
               <tr key={i}>
-                <td className="border border-slate-900 px-1 text-center">{i + 1}.</td>
+                <td className="border border-slate-900 px-1 text-center">{serial}.</td>
                 <td className="border border-slate-900 px-2 text-[14.5px]">{it.description}</td>
                 <td className="border border-slate-900 px-1 text-right">{it.rate ? `${money(it.rate)}/-` : ""}</td>
                 <td className="border border-slate-900 px-1 text-center">
@@ -408,8 +434,9 @@ function QuotationBody({ doc, company, t }) {
                 </td>
                 <td className="border border-slate-900 px-1 text-right">{money(amt)}</td>
               </tr>
-            );
-          })}
+              );
+            });
+          })()}
           {Number(doc.discount_percent || 0) > 0 && (
             <tr>
               <td colSpan={4} className="border border-slate-900 px-2 text-right italic">
